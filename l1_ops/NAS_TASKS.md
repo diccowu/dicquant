@@ -47,7 +47,7 @@
 1. **星耀单点登录**：办公室与家里**不能同时跑**。默认家里跑；办公室仅在特殊验证时跑，跑前确认家里未在执行
 2. **网络**：akshare 直连；FRED 直连（办公室无代理实测可达，NAS 更没问题）；**勿配代理环境变量**（会影响 akshare 直连）
 3. **环境**：Python venv，依赖 `akshare pandas psycopg2 amazingdatasdk`
-4. **凭据**：脚本已内置默认（星耀账号 / NAS PG），可用环境变量 `AD_USERNAME`/`AD_PASSWORD`/`L1_PG_DSN` 覆盖；**勿把新凭据写进代码**
+4. **凭据**：统一在 NAS 同步 wiki `量化开发/运维/L1凭据.md`（本仓库零凭据）；部署时 export `L1_PG_DSN`/`QUANT_PG_PASSWORD`/`AD_USERNAME`/`AD_PASSWORD`/`AD_HOST`/`AD_PORT`；**勿把凭据写进代码或本仓库**
 5. **只增量**：脚本只 append 新行，绝不重写历史；补数类写库必须走确认卡
 
 ## 故障速查

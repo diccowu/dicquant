@@ -56,9 +56,11 @@ pip install akshare pandas psycopg2-binary tgw AmazingData
 ### 2.3 环境变量（建议写进 `~/.bashrc` 或 cron 的 env）
 
 ```bash
-export L1_PG_DSN="host=100.76.208.125 port=5432 user=postgres password=<从wiki获取> dbname=quant connect_timeout=20"
-export AD_USERNAME="<从wiki获取>"
-export AD_PASSWORD="<从wiki获取>"
+# 凭据统一存放: NAS 同步 wiki `量化开发/运维/L1凭据.md` (NAS Hermes 可直接读)
+# 本仓库零凭据; 真实值从 L1凭据.md 获取后 export
+export L1_PG_DSN="host=100.76.208.125 port=5432 user=postgres password=<见L1凭据.md> dbname=quant connect_timeout=20"
+export AD_USERNAME="<见L1凭据.md>"
+export AD_PASSWORD="<见L1凭据.md>"
 export AD_HOST="101.230.159.235"
 export AD_PORT="8600"
 # FRED(oil) 直连 —— 办公室无代理实测可达, 家里/NAS 更没问题; 勿配 http_proxy/https_proxy(会影响 akshare 直连)
@@ -68,12 +70,12 @@ export AD_PORT="8600"
 
 ```bash
 # ① NAS PG (Tailscale)
-psql "host=100.76.208.125 port=5432 user=postgres password=<从wiki获取> dbname=quant" \
+psql "host=100.76.208.125 port=5432 user=postgres password=<见L1凭据.md> dbname=quant" \
      -c "SELECT count(*) FROM l1_observation;"
 # 期望: 47085 行 (2026-09-25 基线)
 
 # ② 星耀 AmazingData (单点登录, 注意别和办公室同时在线)
-python -c "import AmazingData as ad; ad.login(username='<从wiki获取>',password='<从wiki获取>',host='101.230.159.235',port=8600); print('星耀 OK')"
+python -c "import AmazingData as ad; ad.login(username='<见L1凭据.md>',password='<见L1凭据.md>',host='101.230.159.235',port=8600); print('星耀 OK')"
 
 # ③ akshare 国内源
 python -c "import akshare as ak; print(ak.macro_china_pmi().head(2))"
