@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 数据文件(不入库, 主库在 NAS PG)
+*.db
+*.duckdb
+*.parquet
+*.csv
+
+# 本地配置 / 凭据
+.env
+*.local
+.secrets*
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
