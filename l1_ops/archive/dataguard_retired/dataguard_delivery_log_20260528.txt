@@ -1,0 +1,7 @@
+DataGuard 投送日志 - 2026-05-28
+投送时间: 2026-09-28 18:50:00
+路由决策: group (工作群投送)
+未解决问题数量: 3
+状态: 投送内容已生成，等待cron系统处理
+报告文件: dataguard_group_report_20260528.txt
+JSON摘要: validation_summary_20260928_184551.json

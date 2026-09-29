@@ -1,0 +1,51 @@
+{
+  "timestamp": "2026-09-28T18:45:51.049985",
+  "target_date": "2026-05-28",
+  "validation_items": {
+    "script_dataguard_validation.py": "missing",
+    "script_raw_data_updater.py": "missing",
+    "script_generate_dataguard_report.py": "missing",
+    "script_send_dataguard_report_today.py": "exist",
+    "latest_validation": "exist",
+    "latest_json": "exist",
+    "json_parse_error": "'utf-8' codec can't decode byte 0xab in position 2: invalid start byte",
+    "generated_report": "validation_report_20260928_184551.txt"
+  },
+  "issues": {
+    "ISSUE-002": {
+      "name": "北向数据过期检查",
+      "status": "unresolved",
+      "severity": "Critical",
+      "details": [
+        "北向数据过期100天",
+        "最新日期: 2026-04-21, 目标日期: 2026-05-28"
+      ],
+      "impact": "影响市场动态分析和投资决策"
+    },
+    "ISSUE-004": {
+      "name": "跨平台环境配置检查",
+      "status": "unresolved",
+      "severity": "Critical",
+      "details": [
+        "DLL加载失败",
+        "build_macro_factors.py缺失",
+        "update_factors.py缺失",
+        "HS300估值文件不存在"
+      ],
+      "impact": "TQcenter功能异常，影响数据获取"
+    },
+    "ISSUE-005": {
+      "name": "数据完整性检查",
+      "status": "unresolved",
+      "severity": "High",
+      "details": [
+        "基础脚本缺失: build_macro_factors.py, update_factors.py"
+      ],
+      "impact": "影响数据完整性验证"
+    }
+  },
+  "routing": {
+    "current_route": "group",
+    "unresolved_count": 3
+  }
+}

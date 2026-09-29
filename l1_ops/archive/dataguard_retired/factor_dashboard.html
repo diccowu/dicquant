@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>宏观因子IC验证仪表盘</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, 'Microsoft YaHei', sans-serif; background: #0f172a; color: #e2e8f0; padding: 20px; }
+.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+.title { font-size: 24px; font-weight: 700; color: #f1f5f9; }
+.subtitle { font-size: 13px; color: #94a3b8; margin-top: 4px; }
+.upload-bar { display: flex; gap: 12px; align-items: center; }
+.upload-bar input[type="file"] { display: none; }
+.upload-btn { background: #1e293b; color: #e2e8f0; border: 1px solid #334155; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 14px; transition: .2s; }
+.upload-btn:hover { background: #334155; }
+.status { font-size: 13px; color: #94a3b8; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 16px; }
+.card .label { font-size: 12px; color: #94a3b8; margin-bottom: 4px; }
+.card .value { font-size: 22px; font-weight: 700; }
+.section { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+.section h3 { font-size: 16px; margin-bottom: 16px; color: #f1f5f9; }
+.chart-container { position: relative; height: 400px; width: 100%; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 8px 10px; background: #0f172a; color: #94a3b8; font-weight: 500; border-bottom: 1px solid #334155; }
+td { padding: 8px 10px; border-bottom: 1px solid #1e293b; }
+tr:hover td { background: #1e293b; }
+.ic-pos { color: #22c55e; }
+.ic-neg { color: #ef4444; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.badge-ok { background: #14532d; color: #4ade80; }
+.badge-x { background: #450a0a; color: #f87171; }
+.bar-container { display: flex; align-items: center; gap: 4px; }
+.bar { height: 20px; border-radius: 3px; min-width: 2px; }
+.bar-pos { background: #22c55e; }
+.bar-neg { background: #ef4444; }
+.fade { opacity: 0.6; }
+@media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<div class="header">
+<div>
+  <div class="title">宏观因子IC验证仪表盘</div>
+  <div class="subtitle" id="metaInfo">请加载分析结果JSON文件</div>
+</div>
+<div class="upload-bar">
+  <label class="upload-btn" for="jsonFile">📂 选择JSON文件</label>
+  <input type="file" id="jsonFile" accept=".json">
+  <span class="status" id="statusText">未加载</span>
+</div>
+</div>
+
+<div id="content" style="display:none">
+
+<!-- 概览卡片 -->
+<div class="cards" id="summaryCards"></div>
+
+<div class="grid-2">
+  <!-- 相关性热力图 -->
+  <div class="section">
+    <h3>因子Spearman相关性矩阵</h3>
+    <div class="chart-container" style="height:350px">
+      <canvas id="corrChart"></canvas>
+    </div>
+  </div>
+
+  <!-- IC排名 -->
+  <div class="section">
+    <h3>IC验证最佳结果 <span style="font-size:12px;color:#94a3b8">(按ICIR排序)</span></h3>
+    <div style="max-height:350px;overflow-y:auto" id="icTable"></div>
+  </div>
+</div>
+
+<!-- 分组回测 -->
+<div class="section">
+  <h3>5分位分组回测 — 各因子各标的单调性</h3>
+  <div class="chart-container" style="height:450px">
+    <canvas id="quantileChart"></canvas>
+  </div>
+</div>
+
+<!-- IC分因子详情 -->
+<div class="section">
+  <h3>因子IC详细比较 <span style="font-size:12px;color:#94a3b8">(最优ICIR)</span></h3>
+  <div class="chart-container" style="height:400px">
+    <canvas id="icDetailChart"></canvas>
+  </div>
+</div>
+
+</div>
+
+<script>
+let data = null;
+const COLORS = ['#22c55e','#3b82f6','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6'];
+const TARGET_COLORS = {'ret_hs300_value':'#3b82f6','ret_csi500':'#22c55e','ret_gold_etf':'#f59e0b','ret_div_lowvol':'#ef4444','ret_cyb_index':'#8b5cf6'};
+const FACTOR_NAMES = {'pmi':'PMI','scissors_m1m2':'M1-M2剪刀差','shrzgm_yoy':'社融同比','oil_yoy':'原油同比','margin_mom':'两融余额','usdcny_mom':'USD/CNY'};
+const TARGET_NAMES = {'ret_hs300_value':'沪深300','ret_csi500':'中证500','ret_gold_etf':'黄金','ret_div_lowvol':'上证红利','ret_cyb_index':'创业板指'};
+
+document.getElementById('jsonFile').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    try {
+      data = JSON.parse(ev.target.result);
+      document.getElementById('statusText').textContent = '✅ 已加载';
+      document.getElementById('content').style.display = 'block';
+      renderAll();
+    } catch(e) {
+      document.getElementById('statusText').textContent = '❌ JSON解析失败';
+    }
+  };
+  reader.readAsText(file);
+});
+
+function renderAll() {
+  renderMeta();
+  renderCards();
+  renderCorrelation();
+  renderICTable();
+  renderQuantileChart();
+  renderICDetailChart();
+}
+
+function renderMeta() {
+  const m = data.meta;
+  document.getElementById('metaInfo').textContent =
+    `${m.data_range} | ${m.n_obs}个月观测 | ${m.n_factors}因子 × ${m.n_targets}标的`;
+}
+
+function renderCards() {
+  const m = data.meta;
+  const cards = [
+    { label: '数据跨度', value: m.data_range },
+    { label: '观测月数', value: m.n_obs + '个月' },
+    { label: '因子数', value: m.n_factors },
+    { label: '标的数', value: m.n_targets },
+  ];
+  // 添加因子统计
+  for (const [k, v] of Object.entries(data.factors)) {
+    cards.push({ label: FACTOR_NAMES[k] || k, value: `${v.count}条 / 缺失${v.missing}` });
+  }
+  const container = document.getElementById('summaryCards');
+  container.innerHTML = cards.map(c =>
+    `<div class="card"><div class="label">${c.label}</div><div class="value">${c.value}</div></div>`
+  ).join('');
+}
+
+function renderCorrelation() {
+  const corr = data.correlation;
+  const factors = Object.keys(data.factors);
+  const n = factors.length;
+  
+  const labels = factors.map(f => FACTOR_NAMES[f] || f);
+  const values = factors.map(f => factors.map(f2 => corr[f]?.[f2] || 0));
+  
+  // Use a manual canvas render instead of Chart.js matrix plot
+  const canvas = document.getElementById('corrChart');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  canvas.style.width = rect.width + 'px';
+  canvas.style.height = rect.height + 'px';
+  ctx.scale(dpr, dpr);
+  
+  const w = rect.width;
+  const h = rect.height;
+  const pad = { top: 40, right: 20, bottom: 60, left: 80 };
+  const cellW = (w - pad.left - pad.right) / n;
+  const cellH = (h - pad.top - pad.bottom) / n;
+  
+  ctx.clearRect(0, 0, w, h);
+  
+  // Draw cells
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      const val = values[i][j];
+      const x = pad.left + j * cellW;
+      const y = pad.top + i * cellH;
+      
+      // Color based on value
+      let r, g, b;
+      if (val > 0) {
+        r = 0; g = Math.round(180 * val) + 75; b = 60;
+      } else if (val < 0) {
+        r = Math.round(180 * Math.abs(val)) + 75; g = 40; b = 40;
+      } else {
+        r = 30; g = 30; b = 60;
+      }
+      
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillRect(x, y, cellW, cellH);
+      ctx.strokeStyle = '#1e293b';
+      ctx.strokeRect(x, y, cellW, cellH);
+      
+      // Text
+      ctx.fillStyle = Math.abs(val) > 0.3 ? '#fff' : '#94a3b8';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(val.toFixed(2), x + cellW/2, y + cellH/2);
+    }
+  }
+  
+  // Labels
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  for (let j = 0; j < n; j++) {
+    ctx.save();
+    ctx.translate(pad.left + j * cellW + cellW/2, pad.top - 8);
+    ctx.fillText(labels[j], 0, 0);
+    ctx.restore();
+  }
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < n; i++) {
+    ctx.fillText(labels[i], pad.left - 10, pad.top + i * cellH + cellH/2);
+  }
+}
+
+function renderICTable() {
+  const ics = data.ic_analysis;
+  if (!ics || ics.length === 0) return;
+  
+  // Sort by ICIR descending
+  ics.sort((a, b) => Math.abs(b.icir || 0) - Math.abs(a.icir || 0));
+  
+  let html = '<table><thead><tr><th>因子</th><th>标的</th><th>IC</th><th>ICIR</th><th>滞后</th><th>预测</th><th>胜率</th><th>方向</th></tr></thead><tbody>';
+  for (const r of ics) {
+    const icClass = r.rank_ic > 0 ? 'ic-pos' : 'ic-neg';
+    const dirBadge = r.direction_match 
+      ? '<span class="badge badge-ok">同向</span>' 
+      : '<span class="badge badge-x">反向</span>';
+    html += `<tr>
+      <td>${r.factor_name}</td>
+      <td>${r.target_name}</td>
+      <td class="${icClass}">${(r.rank_ic * 100).toFixed(1)}%</td>
+      <td>${r.icir.toFixed(2)}</td>
+      <td>${r.lag}月</td>
+      <td>T+${r.horizon}</td>
+      <td>${(r.win_rate * 100).toFixed(0)}%</td>
+      <td>${dirBadge}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('icTable').innerHTML = html;
+}
+
+function renderQuantileChart() {
+  const qb = data.quantile_backtest;
+  if (!qb || qb.length === 0) return;
+  
+  const labels = qb.map(r => `${FACTOR_NAMES[r.factor]||r.factor}-${TARGET_NAMES[r.target]||r.target_name}`);
+  
+  // Group by factor, show Q1-Q5 spread for each
+  const datasets = [];
+  for (let q = 1; q <= 5; q++) {
+    const key = `Q${q}`;
+    datasets.push({
+      label: key,
+      data: qb.map(r => r[key] || 0),
+      backgroundColor: ['#22c55e55','#3b82f655','#f59e0b88','#f9731688','#ef444488'][q-1],
+      borderColor: ['#22c55e','#3b82f6','#f59e0b','#f97316','#ef4444'][q-1],
+      borderWidth: 1,
+    });
+  }
+  
+  new Chart(document.getElementById('quantileChart'), {
+    type: 'bar',
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'top', labels: { color: '#94a3b8' } },
+        tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.raw.toFixed(2)}%` } }
+      },
+      scales: {
+        x: { ticks: { color: '#94a3b8', font: { size: 10 } } },
+        y: { title: { display: true, text: '月收益率 %', color: '#94a3b8' },
+             ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } }
+      }
+    }
+  });
+}
+
+function renderICDetailChart() {
+  const ics = data.ic_analysis;
+  if (!ics || ics.length === 0) return;
+  
+  const targets = [...new Set(ics.map(r => r.target))];
+  const factors = [...new Set(ics.map(r => r.factor))];
+  
+  const datasets = factors.map((f, i) => ({
+    label: FACTOR_NAMES[f] || f,
+    data: targets.map(t => {
+      const match = ics.filter(r => r.factor === f && r.target === t);
+      if (match.length === 0) return null;
+      // Pick the one with highest ICIR
+      match.sort((a, b) => Math.abs(b.icir) - Math.abs(a.icir));
+      return match[0].rank_ic;
+    }),
+    borderColor: COLORS[i],
+    backgroundColor: COLORS[i] + '44',
+    tension: 0.3,
+    pointRadius: 5,
+  }));
+  
+  new Chart(document.getElementById('icDetailChart'), {
+    type: 'bar',
+    data: {
+      labels: targets.map(t => TARGET_NAMES[t] || t),
+      datasets
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'top', labels: { color: '#94a3b8' } },
+        tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${(ctx.raw*100).toFixed(1)}%` } }
+      },
+      scales: {
+        x: { ticks: { color: '#94a3b8' } },
+        y: { title: { display: true, text: 'Rank IC', color: '#94a3b8' },
+             ticks: { color: '#94a3b8', callback: v => (v*100).toFixed(0)+'%' },
+             grid: { color: '#1e293b' } }
+      }
+    }
+  });
+}
+</script>
+</body>
+</html>

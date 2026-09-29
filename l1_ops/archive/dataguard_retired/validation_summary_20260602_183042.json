@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-06-02 18:30:43",
+  "issues": {
+    "ISSUE-002": "unresolved",
+    "ISSUE-004": "unresolved",
+    "ISSUE-005": "unresolved"
+  },
+  "routing": {
+    "route": "group",
+    "reason": "以下问题仍未解决: ISSUE-002, ISSUE-004, ISSUE-005",
+    "unresolved_count": 3,
+    "total_count": 3
+  },
+  "stats": {
+    "pass": 10,
+    "fail": 4,
+    "warn": 1,
+    "total_checks": 21
+  },
+  "report_file": "/mnt/c/new_tdx64/PYPlugins/user/validation_report_20260602_183042.txt"
+}
