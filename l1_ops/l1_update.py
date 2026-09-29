@@ -47,6 +47,36 @@ DAILY = ["hs300_pe_ttm", "treasury_y1", "treasury_y10", "us10y",
 MONTHLY = ["pmi", "cpi_yoy", "cpi_mom", "cpi_ytd", "ppi_yoy", "ppi_ytd",
            "m1_yoy", "m2_yoy", "shrzgm"]
 
+# 两融交易所完整性基准(与 pit_init 口径段一致): 2023-02-13 北交所两融开通起含 NEEQ
+MARGIN_NEEQ_START = "2023-02-13"
+
+
+def _margin_need(dstr):
+    """某日应含的交易所集合(两融口径分段)"""
+    return {"SSE", "SZSE", "NEEQ"} if str(dstr) >= MARGIN_NEEQ_START else {"SSE", "SZSE"}
+
+
+def margin_complete_prefix(prim):
+    """两融交易所完整性截断(2026-09-24 事故沉淀)。
+
+    源按交易所**异步发布**, 残缺日参与 SUM 会显著低估全市场值(09-24 只含 SSE
+    → 比真实值低 49%)。本函数:
+      - 逐日核对交易所集合是否 ⊇ _margin_need(该日口径)
+      - 返回 **首个残缺日之前的完整前缀**(不越过缺口 → 增量起点不会被推过缺口,
+        残缺日不会变成永久空洞; 下次增量从缺口处重取, 源补齐即自愈)
+      - 同时返回残缺明细 [(日期, 缺失交易所集合), ...] 供日志/告警
+
+    入参/出参均为 DataFrame(需含 date / exchange 列); 无残缺时原样返回, bad=[]。
+    """
+    if prim is None or len(prim) == 0:
+        return prim, []
+    ex_sets = prim.groupby("date")["exchange"].apply(lambda s: set(s.astype(str)))
+    bad = [(d, _margin_need(d) - ex_sets[d]) for d in sorted(ex_sets.index)
+           if not _margin_need(d) <= ex_sets[d]]
+    if not bad:
+        return prim, []
+    return prim[prim["date"] < bad[0][0]].reset_index(drop=True), bad
+
 
 # ── 复用 pit_init.py 的注册表与发布日映射(单一事实源, 避免分叉) ──────────────
 def load_pit_init(raw_dir=None, explicit=None):
@@ -97,7 +127,8 @@ def merge_append(old, new, keys, date_col="date"):
     return combined, added
 
 
-def guard(df, name, value_cols, ranges, date_col="date"):
+def guard(df, name, value_cols, ranges, date_col="date", dup_key=None):
+    """护栏。dup_key: 同日多行源(如两融按交易所明细)传 ["date","exchange"]，默认按日期单行"""
     errs = []
     if len(df) == 0:
         errs.append("空表")
@@ -106,9 +137,13 @@ def guard(df, name, value_cols, ranges, date_col="date"):
             errs.append(f"缺列 {c}")
     if errs:
         raise ValueError(f"{name} 结构异常: {errs}")
-    if df[date_col].duplicated().any():
-        errs.append(f"日期重复 {df[date_col].duplicated().sum()} 行")
-    if not df[date_col].is_monotonic_increasing:
+    keys = dup_key or [date_col]
+    for k in keys:
+        if k not in df.columns:
+            raise ValueError(f"{name} dup_key 缺列: {k}")
+    if df[keys].duplicated().any():
+        errs.append(f"键重复 {df[keys].duplicated().sum()} 行 {keys}")
+    if len(keys) == 1 and not df[date_col].is_monotonic_increasing:
         errs.append("日期非递增")
     for c in value_cols:
         s = pd.to_numeric(df[c], errors="coerce")
@@ -314,7 +349,12 @@ def collect_treasury(since):
 
 def collect_margin(since):
     """星耀 get_margin_summary → DataFrame[TRADE_DATE,EXCHANGE,SUM_*]
-    → (primary{date,exchange,...}, daily{date,margin_balance,margin_purchase} 按日SUM)"""
+    → (primary{date,exchange,...}, daily{date,margin_balance,margin_purchase} 按日SUM)
+
+    ⚠️ 完整性护栏(2026-09-24 事故沉淀): 源按交易所**异步发布**, 残缺日(缺任一交易所)
+    参与 SUM 会显著低估全市场值(09-24 只含 SSE → 低于真实 49%)。故: 只对交易所齐全的
+    日期做聚合; 残缺日**跳过聚合**(primary 明细照常保留), 下次增量源补齐后自动纳入。
+    """
     _ad_login()
     import AmazingData as ad
     info = ad.InfoData()
@@ -341,6 +381,15 @@ def collect_margin(since):
     prim = _filter_new(prim, since, "date")
     if len(prim) == 0:
         return pd.DataFrame(), pd.DataFrame()
+    # —— 交易所完整性护栏 ——
+    prim, bad = margin_complete_prefix(prim)
+    if bad:
+        detail = "; ".join(f"{d}(缺{','.join(sorted(m))})" for d, m in bad[:5])
+        log(f"   ⚠️ 完整性: 残缺日 {len(bad)} 个 → 截断至 {bad[0][0]} 前, 该日及之后待源补齐 "
+            f"| {detail}{' ...' if len(bad) > 5 else ''}")
+        if len(prim) == 0:
+            log("   ⚠️ 完整性: 本次全部日期均残缺 → 不产出数据(源补齐后自动纳入)")
+            return pd.DataFrame(), pd.DataFrame()
     daily = (prim.groupby("date", as_index=False)
              .agg(margin_balance=("margin_trade_balance", "sum"),
                   margin_purchase=("purchase_amt", "sum")))
@@ -366,13 +415,25 @@ def collect_floatcap(since):
     df["TRADE_DATE"] = pd.to_datetime(df["TRADE_DATE"].astype(str)).dt.strftime("%Y-%m-%d")
     df = df[COLS].drop_duplicates("TRADE_DATE", keep="last")
     df = df.sort_values("TRADE_DATE").reset_index(drop=True)
+    # ⚠️ 窗口护栏(2026-09-29 回归事故沉淀): 源对"当日(未收盘/未发布市值)"行,
+    # TOTAL_CAP/A_FLOAT_CAP 返回 NaN —— 若纳入会把残缺行当完整写入。
+    # 只保留市值齐全的行; 当日缺失 → 下次增量(T+1 源补齐)自动纳入。
+    n_before = len(df)
+    bad_na = int(df[["TOTAL_CAP", "A_FLOAT_CAP"]].isna().sum().sum())
+    if bad_na:
+        df = df.dropna(subset=["TOTAL_CAP", "A_FLOAT_CAP"]).reset_index(drop=True)
+        # 语义: 报"剔除 N 行"按行数计(2026-09-29 qucoder ②: 原按 NaN 单元格数虚报)
+        n_dropped = n_before - len(df)
+        log(f"   ⚠️ 窗口护栏: 剔除市值不全行 {n_dropped} 行(NaN 单元格 {bad_na} 个; "
+            f"源未发布完整 → 下次增量自动补)")
     return _filter_new(df, since, "TRADE_DATE")
 
 
 # ── 指标 → 文件/采集器/值列/值域 计划 ───────────────────────────────────────
 def build_plan():
-    def s(file, engine, gc, rng, date_col="date"):
-        return dict(file=file, engine=engine, guard_cols=gc, ranges=rng, date_col=date_col)
+    def s(file, engine, gc, rng, date_col="date", dup_key=None):
+        return dict(file=file, engine=engine, guard_cols=gc, ranges=rng,
+                    date_col=date_col, dup_key=dup_key)
     return {
         "hs300_pe_ttm":   s("macro_hs300_pe_primary.csv", "ak_hs300_pe", ["pe_ttm"],
                             {"pe_ttm": (8.0, 25.0)}),
@@ -390,10 +451,12 @@ def build_plan():
                             {"brent": (5.0, 250.0)}),
         "margin_balance": s("macro_margin_ad_daily.csv", "ad_margin",
                             ["margin_balance", "margin_purchase"],
-                            {"margin_balance": (0.0, 5e12), "margin_purchase": (0.0, 1e13)}),
+                            {"margin_balance": (0.0, 5e12), "margin_purchase": (0.0, 1e13)},
+                            dup_key=["date", "exchange"]),
         "margin_purchase": s("macro_margin_ad_daily.csv", "ad_margin",
                              ["margin_balance", "margin_purchase"],
-                             {"margin_balance": (0.0, 5e12), "margin_purchase": (0.0, 1e13)}),
+                             {"margin_balance": (0.0, 5e12), "margin_purchase": (0.0, 1e13)},
+                             dup_key=["date", "exchange"]),
         "float_cap":      s("macro_floatcap_primary.csv", "ad_floatcap", ["A_FLOAT_CAP"],
                             {"A_FLOAT_CAP": (6.0e8, 6.0e9), "TOTAL_CAP": (5.0e8, 1.0e10)},
                             date_col="TRADE_DATE"),
@@ -548,7 +611,11 @@ def main():
 
             # —— 护栏 ——
             gcols = [c for c in plan[group[0]]["guard_cols"] if c in new.columns]
-            guard(new, fname, gcols, plan[group[0]]["ranges"], dcol)
+            ranges = plan[group[0]]["ranges"]
+            guard(new, fname, gcols, ranges, dcol, dup_key=plan[group[0]].get("dup_key"))
+            if engine == "ad_margin" and new_daily is not None and len(new_daily):
+                guard(new_daily, fname + "(daily聚合层)", ["margin_balance", "margin_purchase"],
+                      ranges, "date")
 
             # —— 写 CSV (仅 local 模式) ——
             if write_csv and not a.dry_run:
@@ -556,8 +623,11 @@ def main():
                     oldp = read_csv(raw / "macro_margin_ad_primary.csv")
                     mp, _ = merge_append(oldp, new, ["date", "exchange"])
                     atomic_write_csv(mp, raw / "macro_margin_ad_primary.csv")
-                    md, _ = merge_append(old, new_daily, ["date"])
-                    atomic_write_csv(md, fpath)
+                    if new_daily is not None and len(new_daily):
+                        md, _ = merge_append(old, new_daily, ["date"])
+                        atomic_write_csv(md, fpath)
+                    log(f"   → 明细 +{len(new)} 行; 聚合层 {len(new_daily) if new_daily is not None else 0} 行"
+                        f"(残缺日不聚合, 源补齐后自动纳入)")
                 else:
                     merged, _ = merge_append(old, new, [dcol], dcol)
                     guard(merged, fname + "(merged)", gcols, plan[group[0]]["ranges"], dcol)
@@ -571,6 +641,9 @@ def main():
                     cand = [c for c in new.columns if c != dcol]
                     vc = cand[0] if len(cand) == 1 else None
                 src = new_daily if engine == "ad_margin" else new
+                if src is None or len(src) == 0:
+                    log(f"   {i}: 跳过 PG(本次无齐全日聚合, 源补齐后自动纳入)")
+                    continue
                 if vc is None or vc not in src.columns:
                     log(f"   {i}: 跳过 PG(value_col={vc} 不可用)")
                     continue
