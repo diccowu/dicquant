@@ -99,6 +99,22 @@ INDICATORS = [
     ("margin_purchase", "macro_margin_ad_daily.csv",  "D", 0, "融资买入额(三所SUM,元);2026-09-21重建:派生聚合层daily[macro_margin_ad_daily.csv],源=AmazingData get_margin_summary;口径段与回补同margin_balance;日频可得时点=T日盘后/T+1盘前,消费端恒T+1起usable(前视审查2026-09-21 TASK_007)→lag=0自洽", 0, "ad", "margin_purchase", (0.0, 1e13)),
     # —— 流通市值(AmazingData,日频, 第17项定稿 2026-09-22)——
     ("float_cap",     "macro_floatcap_primary.csv",    "D", 0, "A股流通市值(万元);2026-09-22定稿:源=AmazingData 申万A指 801003.SI 日频宽表{TRADE_DATE,...,TOTAL_CAP,A_FLOAT_CAP},value_col=A_FLOAT_CAP;两融占比因子分母;⚠️2011-01-04 疑似口径切换(占比72.33%→33.05%,流通市值当日−54.01%),下游跨2010/2011须显式处理,见methodology_version;实测值域6.36万亿~52.62万亿元(=6.36e8~5.26e9万元)", 0, "ad", "A_FLOAT_CAP", (6.0e8, 6.0e9)),
+    # —— 10-01 扩源①: 短端国债 6M/2Y(拆已有 9 期限宽表,零新采集)——
+    ("treasury_m6",   "macro_treasury_ad_primary.csv", "D", 0, "6M国债到期收益率(%),中债,AmazingData get_treasury_yield;9期限宽表{m3,m6,y1,y2,y3,y5,y7,y10,y30}按列拆分;10-01扩源:短端利率因子(交银国际60因子择时实证6M最强:年化13.2%/收益波动比71%,vs 10Y仅9.0%/53%);可得时点=T日盘后/T+1盘前,消费端恒T+1起usable(前视审查同treasury_y1)→lag=0自洽", 0, "ad", "m6", (0.0, 10.0)),
+    ("treasury_y2",   "macro_treasury_ad_primary.csv", "D", 0, "2Y国债到期收益率(%),中债,AmazingData get_treasury_yield;9期限宽表按列拆分;10-01扩源:期限利差10Y−2Y短端腿(Estrella-Mishkin/芝加哥联储学术标准用2Y,替代原10Y−1Y);可得时点同treasury_y1→lag=0自洽", 0, "ad", "y2", (0.0, 10.0)),
+    # —— 10-01 扩源②: BIS 人民币名义有效汇率(FRED NBCNBIS,月频,免费免key实测直下)——
+    ("neer_cny",      "macro_neer_fred_primary.csv",  "M", 0, "人民币名义有效汇率指数(BIS Broad,2010=100);10-01扩源:源=FRED NBCNBIS(BIS官方,1994-01起391行,实测60.36~114.29,最新2026-07=114.29);贸易加权多币种篮子(60+货币)剔除美元单边波动,替代双边USDCNY作汇率因子(Type2同比);BIS月中发布上月→lag=30(实测2026-07于2026-08-20更新,保守取30无前视)", 30, "fred", None, (50.0, 160.0)),
+    # —— 10-01 扩源③: 资金面 DR007(akshare repo_rate_hist,免费实测)——
+    ("dr007",         "macro_dr007_primary.csv",       "D", 0, "DR007(银行间存款类机构7天质押式回购加权利率,%);10-01扩源:源=akshare repo_rate_hist FDR007列(实测2026-09-30=1.3626%);央行公开市场操作直接盯住的资金面体温计,日频最灵敏;与Shibor互为验证(冗余非新维度);可得时点=T日盘后/T+1盘前→lag=0自洽", 0, "akshare", "fdr007", (0.0, 8.0)),
+    # —— 10-01 扩源④: Shibor 3M(akshare macro_china_shibor_all,免费实测)——
+    ("shibor_3m",     "macro_shibor_primary.csv",      "D", 0, "Shibor 3M(上海银行间同业拆放利率,%);10-01扩源:源=akshare macro_china_shibor_all '3M-定价'列(实测2026-09-30=1.43%);样本比DR007宽(含全部报价行),与DR007互为交叉验证;3M为常用资金面基准;可得时点=T日盘后/T+1盘前→lag=0自洽", 0, "akshare", "3M-定价", (0.0, 10.0)),
+    # —— 10-01 扩源⑤: LPR 1Y/5Y(akshare macro_china_lpr,免费实测,月频)——
+    ("lpr_1y",        "macro_lpr_primary.csv",         "M", 0, "LPR 1Y(贷款市场报价利率,%);10-01扩源:源=akshare macro_china_lpr LPR1Y列(实测2026-09-20=3.0%);MLF→LPR→实体贷款利率传导的政策转向确认信号;每月20日9:00公布→period=公布月20日,announcement=公布月末(保守晚于真实发布,无前视),lag=0;起点2019-08(改革后仅约7年)", 0, "akshare", "lpr1y", (2.0, 6.0)),
+    ("lpr_5y",        "macro_lpr_primary.csv",         "M", 0, "LPR 5Y(贷款市场报价利率,%);10-01扩源:源=akshare macro_china_lpr LPR5Y列(实测2026-09-20=3.5%);房贷/长期信贷锚;发布日同lpr_1y;起点2019-08", 0, "akshare", "lpr5y", (2.0, 7.0)),
+    # —— 10-01 扩源⑥: 信用利差原始腿(中债中短期票据AAA,akshare bond_china_yield,免费实测)——
+    ("cbond_aaa_10y", "macro_bond_aaa_primary.csv",    "D", 0, "中债中短期票据到期收益率(AAA)10年(%);10-01扩源:源=akshare bond_china_yield 曲线'中债中短期票据收益率曲线(AAA)'×期限'10年'列(实测2026-09-30=1.95%);信用利差=本指标−treasury_y10在因子层合成(PIT红线:原始层只存水平值,派生下沉因子层);走阔=避险情绪升/信贷收紧,2008/2018/2022大跌前先走阔;可得时点=T日盘后/T+1盘前→lag=0自洽", 0, "akshare", "aaa_10y", (1.0, 8.0)),
+    # —— 10-01 扩源⑦: 全A成交额(本地通达信 sh880001,零网络)——
+    ("mkt_amount",    "sh880001.day",                  "D", 0, "全A成交额(元);10-01扩源:源=本地通达信全A指数日线 sh880001.day(/mnt/c/new_tdx64/vipdoc/sh/lday/,3632条2011-10~2026-09-30,零网络);.day二进制32字节记录解析取amount字段(实测2026-09-30=1.45万亿,历史min 625亿);两融买入/成交额流量分母(反向因子);当日盘后可得→lag=0自洽", 0, "tdx", "amount", (4.0e10, 5.0e13)),
 ]
 
 # 口径断点登记(社融 v1a~v3,出处见 PIT数据层.md 第五节,2026-09-17 用户核验全 verified)

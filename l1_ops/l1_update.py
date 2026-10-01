@@ -42,10 +42,11 @@ PG_DEFAULT = ("host=100.76.208.125 port=5432 user=postgres "
               "dbname=quant connect_timeout=20 "
               "keepalives=1 keepalives_idle=30 keepalives_interval=10 keepalives_count=6")
 
-DAILY = ["hs300_pe_ttm", "treasury_y1", "treasury_y10", "us10y",
-         "usdcny", "oil", "margin_balance", "margin_purchase", "float_cap"]
+DAILY = ["hs300_pe_ttm", "treasury_y1", "treasury_y10", "treasury_m6", "treasury_y2",
+         "us10y", "usdcny", "oil", "margin_balance", "margin_purchase", "float_cap",
+         "dr007", "shibor_3m", "cbond_aaa_10y", "mkt_amount"]
 MONTHLY = ["pmi", "cpi_yoy", "cpi_mom", "cpi_ytd", "ppi_yoy", "ppi_ytd",
-           "m1_yoy", "m2_yoy", "shrzgm"]
+           "m1_yoy", "m2_yoy", "shrzgm", "neer_cny", "lpr_1y", "lpr_5y"]
 
 # 两融交易所完整性基准(与 pit_init 口径段一致): 2023-02-13 北交所两融开通起含 NEEQ
 MARGIN_NEEQ_START = "2023-02-13"
@@ -429,6 +430,141 @@ def collect_floatcap(since):
     return _filter_new(df, since, "TRADE_DATE")
 
 
+# ── 源采集器: 10-01 扩源(免费源: FRED / akshare / 本地通达信) ─────────────────
+def collect_neer(since):
+    """FRED NBCNBIS (BIS Broad 人民币名义有效汇率, 2010=100, 月频)
+    → {date, neer}; date=源 observation_date(月初). ⚠️ BIS 60+货币篮子 ≠ CFETS 24货币, 近似替代"""
+    import urllib.request
+    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NBCNBIS"
+    with urllib.request.urlopen(url, timeout=60) as resp:
+        raw = resp.read().decode()
+    rows = [r.split(",") for r in raw.strip().split("\n")[1:] if r.strip()]
+    out = pd.DataFrame([(r[0], r[1]) for r in rows], columns=["date", "neer"])
+    out["neer"] = pd.to_numeric(out["neer"].replace(".", pd.NA), errors="coerce").round(2)
+    out = out.dropna(subset=["neer"]).drop_duplicates("date", keep="last")
+    out = out.sort_values("date").reset_index(drop=True)
+    return _filter_new(out, since, "date")
+
+
+def collect_dr007(since):
+    """akshare repo_rate_hist → {date, fdr007}; DR007=存款类机构7天质押式回购加权利率
+    (FDR007 列, 实测 2017-05-31 起有值; 更早源返回空/报错 → 起点 2017-01-01)"""
+    import akshare as ak
+    # FDR007 源起点 2017-05-31; 逐年拉避免单次超长区间
+    start_y = since.year if since and since.year >= 2017 else 2017
+    end_y = date.today().year
+    frames = []
+    fails = []
+    for y in range(start_y, end_y + 1):
+        s, e = f"{y}0101", f"{y}1231"
+        try:
+            df = ak.repo_rate_hist(start_date=s, end_date=e)
+        except Exception as ex:
+            fails.append(f"{y}({type(ex).__name__})")
+            continue  # 早年源无数据(KeyError 'frValueMap'), 跳过该年
+        if df is None or len(df) == 0:
+            fails.append(f"{y}(空)")
+            continue
+        frames.append(df[["date", "FDR007"]])
+    if fails:
+        log(f"   ⚠️ dr007 逐年分段: {len(fails)}/{end_y - start_y + 1} 年未取到 → {','.join(fails)}")
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True)
+    out = out.rename(columns={"FDR007": "fdr007"})
+    out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
+    out["fdr007"] = pd.to_numeric(out["fdr007"], errors="coerce").round(4)
+    out = out.dropna(subset=["fdr007"]).drop_duplicates("date", keep="last")
+    out = out.sort_values("date").reset_index(drop=True)
+    return _filter_new(out, since, "date")
+
+
+def collect_shibor(since):
+    """akshare macro_china_shibor_all → {date, '3M-定价'}; Shibor 3M(全报价行, 比 DR007 样本宽)"""
+    import akshare as ak
+    df = ak.macro_china_shibor_all()
+    out = df[["日期", "3M-定价"]].copy()
+    out.columns = ["date", "3M-定价"]
+    out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
+    out["3M-定价"] = pd.to_numeric(out["3M-定价"], errors="coerce").round(4)
+    out = out.dropna(subset=["3M-定价"]).drop_duplicates("date", keep="last")
+    out = out.sort_values("date").reset_index(drop=True)
+    return _filter_new(out, since, "date")
+
+
+def collect_lpr(since):
+    """akshare macro_china_lpr → {date, lpr1y, lpr5y}; 月频, date=公布日(每月20日)
+    ⚠️ LPR 2019-08 改革前为旧贷款基础利率(2013-10 试点, 定价机制不同) → 起点 2019-08-20"""
+    import akshare as ak
+    df = ak.macro_china_lpr()
+    out = df[["TRADE_DATE", "LPR1Y", "LPR5Y"]].copy()
+    out.columns = ["date", "lpr1y", "lpr5y"]
+    out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
+    out["lpr1y"] = pd.to_numeric(out["lpr1y"], errors="coerce").round(2)
+    out["lpr5y"] = pd.to_numeric(out["lpr5y"], errors="coerce").round(2)
+    out = out.dropna(subset=["lpr1y"]).drop_duplicates("date", keep="last")
+    out = out[out["date"] >= "2019-08-20"].sort_values("date").reset_index(drop=True)
+    return _filter_new(out, since, "date")
+
+
+def collect_cbond_aaa(since):
+    """akshare bond_china_yield → {date, aaa_10y}; 中债中短期票据收益率曲线(AAA)×10年
+    信用利差=本列−treasury_y10 在因子层合成(PIT红线: 原始层只存水平值).
+    ⚠️ 源按年拉取性能 12.5s/年 → 逐年分段; 历史 2009 起(2008-01 已有 AAA 曲线)"""
+    import akshare as ak
+    start_y = since.year if since and since.year >= 2009 else 2009
+    end_y = date.today().year
+    frames = []
+    fails = []
+    for y in range(start_y, end_y + 1):
+        try:
+            df = ak.bond_china_yield(start_date=f"{y}0101", end_date=f"{y}1231")
+        except Exception as ex:
+            fails.append(f"{y}({type(ex).__name__})")
+            continue
+        if df is None or len(df) == 0:
+            fails.append(f"{y}(空)")
+            continue
+        aaa = df[df["曲线名称"] == "中债中短期票据收益率曲线(AAA)"]
+        if len(aaa):
+            frames.append(aaa[["日期", "10年"]])
+        else:
+            fails.append(f"{y}(无AAA曲线)")
+    if fails:
+        log(f"   ⚠️ cbond_aaa 逐年分段: {len(fails)}/{end_y - start_y + 1} 年未取到 → {','.join(fails)}")
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True)
+    out.columns = ["date", "aaa_10y"]
+    out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
+    out["aaa_10y"] = pd.to_numeric(out["aaa_10y"], errors="coerce").round(4)
+    out = out.dropna(subset=["aaa_10y"]).drop_duplicates("date", keep="last")
+    out = out.sort_values("date").reset_index(drop=True)
+    return _filter_new(out, since, "date")
+
+
+def collect_mkt_amount(since):
+    """本地通达信全A指数日线 sh880001.day → {date, amount}
+    32字节/记录: date(int YYYYMMDD), open, high, low, close, amount(float 元), vol, _;
+    ⚠️ 文件在 Windows 通达信安装目录, 办公室零网络可读"""
+    import struct as _st
+    p = Path(os.environ.get("TDX_SH880001", "/mnt/c/new_tdx64/vipdoc/sh/lday/sh880001.day"))
+    if not p.exists():
+        raise FileNotFoundError(f"sh880001.day 不存在: {p}")
+    data = p.read_bytes()
+    rec = _st.unpack_from
+    rows = []
+    for off in range(0, len(data), 32):
+        d, _, _, _, _, amt, _, _ = rec("<iiiiifii", data, off)
+        rows.append((str(d), float(amt)))
+    out = pd.DataFrame(rows, columns=["date", "amount"])
+    out["date"] = pd.to_datetime(out["date"], format="%Y%m%d").dt.strftime("%Y-%m-%d")
+    out["amount"] = pd.to_numeric(out["amount"], errors="coerce").round(0)
+    out = out.dropna(subset=["amount"]).drop_duplicates("date", keep="last")
+    out = out.sort_values("date").reset_index(drop=True)
+    return _filter_new(out, since, "date")
+
+
 # ── 指标 → 文件/采集器/值列/值域 计划 ───────────────────────────────────────
 def build_plan():
     def s(file, engine, gc, rng, date_col="date", dup_key=None):
@@ -480,6 +616,27 @@ def build_plan():
         "shrzgm":         s("macro_shrzgm_primary.csv", "ak_shrzgm",
                             ["shrzgm_cum", "shrzgm_inc"],
                             {"shrzgm_inc": (-10000.0, 100000.0)}),
+        # —— 10-01 扩源 ——
+        "treasury_m6":    s("macro_treasury_ad_primary.csv", "ad_treasury",
+                            ["m3", "m6", "y1", "y2", "y3", "y5", "y7", "y10", "y30"],
+                            {"m6": (0.0, 10.0)}),
+        "treasury_y2":    s("macro_treasury_ad_primary.csv", "ad_treasury",
+                            ["m3", "m6", "y1", "y2", "y3", "y5", "y7", "y10", "y30"],
+                            {"y2": (0.0, 10.0)}),
+        "neer_cny":       s("macro_neer_fred_primary.csv", "fred_neer", ["neer"],
+                            {"neer": (50.0, 160.0)}),
+        "dr007":          s("macro_dr007_primary.csv", "ak_dr007", ["fdr007"],
+                            {"fdr007": (0.0, 8.0)}),
+        "shibor_3m":      s("macro_shibor_primary.csv", "ak_shibor", ["3M-定价"],
+                            {"3M-定价": (0.0, 10.0)}),
+        "lpr_1y":         s("macro_lpr_primary.csv", "ak_lpr", ["lpr1y", "lpr5y"],
+                            {"lpr1y": (2.0, 6.0)}),
+        "lpr_5y":         s("macro_lpr_primary.csv", "ak_lpr", ["lpr1y", "lpr5y"],
+                            {"lpr5y": (2.0, 7.0)}),
+        "cbond_aaa_10y":  s("macro_bond_aaa_primary.csv", "ak_cbond_aaa", ["aaa_10y"],
+                            {"aaa_10y": (1.0, 8.0)}),
+        "mkt_amount":     s("sh880001.day", "tdx_mkt_amount", ["amount"],
+                            {"amount": (4.0e10, 5.0e13)}),
     }
 
 
@@ -537,6 +694,9 @@ def run_collector(engine, since):
         "ak_money": collect_money_supply, "ak_shrzgm": collect_shrzgm,
         "ad_treasury": collect_treasury, "ad_floatcap": collect_floatcap,
         "ad_margin": collect_margin,
+        "fred_neer": collect_neer, "ak_dr007": collect_dr007,
+        "ak_shibor": collect_shibor, "ak_lpr": collect_lpr,
+        "ak_cbond_aaa": collect_cbond_aaa, "tdx_mkt_amount": collect_mkt_amount,
     }[engine](since)
 
 
