@@ -480,14 +480,14 @@ def collect_dr007(since):
 
 
 def collect_shibor(since):
-    """akshare macro_china_shibor_all → {date, '3M-定价'}; Shibor 3M(全报价行, 比 DR007 样本宽)"""
+    """akshare macro_china_shibor_all → {date, shibor_3m}; Shibor 3M(全报价行, 比 DR007 样本宽)"""
     import akshare as ak
     df = ak.macro_china_shibor_all()
     out = df[["日期", "3M-定价"]].copy()
-    out.columns = ["date", "3M-定价"]
+    out.columns = ["date", "shibor_3m"]
     out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
-    out["3M-定价"] = pd.to_numeric(out["3M-定价"], errors="coerce").round(4)
-    out = out.dropna(subset=["3M-定价"]).drop_duplicates("date", keep="last")
+    out["shibor_3m"] = pd.to_numeric(out["shibor_3m"], errors="coerce").round(4)
+    out = out.dropna(subset=["shibor_3m"]).drop_duplicates("date", keep="last")
     out = out.sort_values("date").reset_index(drop=True)
     return _filter_new(out, since, "date")
 
@@ -627,8 +627,8 @@ def build_plan():
                             {"neer": (50.0, 160.0)}),
         "dr007":          s("macro_dr007_primary.csv", "ak_dr007", ["fdr007"],
                             {"fdr007": (0.0, 8.0)}),
-        "shibor_3m":      s("macro_shibor_primary.csv", "ak_shibor", ["3M-定价"],
-                            {"3M-定价": (0.0, 10.0)}),
+        "shibor_3m":      s("macro_shibor_primary.csv", "ak_shibor", ["shibor_3m"],
+                            {"shibor_3m": (0.0, 10.0)}),
         "lpr_1y":         s("macro_lpr_primary.csv", "ak_lpr", ["lpr1y", "lpr5y"],
                             {"lpr1y": (2.0, 6.0)}),
         "lpr_5y":         s("macro_lpr_primary.csv", "ak_lpr", ["lpr1y", "lpr5y"],

@@ -20,7 +20,7 @@ def pg_rows(ind):
 MAP = [
     ("neer_cny",      "/root/l1_ops/l0_staging_1001/macro_neer_fred_primary.csv", "neer"),
     ("dr007",         "/root/l1_ops/l0_staging_1001/macro_dr007_primary.csv",      "fdr007"),
-    ("shibor_3m",     "/root/l1_ops/l0_staging_1001/macro_shibor_primary.csv",     "3M-定价"),
+    ("shibor_3m",     "/root/l1_ops/l0_staging_1001/macro_shibor_primary.csv",     "shibor_3m"),
     ("lpr_1y",        "/root/l1_ops/l0_staging_1001/macro_lpr_primary.csv",        "lpr1y"),
     ("lpr_5y",        "/root/l1_ops/l0_staging_1001/macro_lpr_primary.csv",        "lpr5y"),
     ("cbond_aaa_10y", "/root/l1_ops/l0_staging_1001/macro_bond_aaa_primary.csv",   "aaa_10y"),

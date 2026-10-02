@@ -21,14 +21,17 @@ JOBS = [
     ("cbond_aaa_10y", "/tmp/l1_expand/cbond_aaa_10y.parquet", "macro_bond_aaa_primary.csv",    ["date", "aaa_10y"]),
 ]
 
+# 意见②规范化:parquet 源列(akshare 原生中文) → L0 输出列(英文,与 pit_init value_col 一致)
+RENAME = {"3M-定价": "shibor_3m"}
+
 report = []
 for name, src, fname, cols in JOBS:
     df = pd.read_parquet(src)
     assert [c for c in df.columns if c in cols] == cols, f"{name} 列不匹配: {list(df.columns)}"
-    out = df[cols].copy()
+    out = df[cols].copy().rename(columns=RENAME)
     out.to_csv(STAGE / fname, index=False, encoding="utf-8")
     # 数值摘要
-    val = [c for c in cols if c != "date"][0]
+    val = RENAME.get([c for c in cols if c != "date"][0], [c for c in cols if c != "date"][0])
     n = len(out)
     lo, hi = out[val].min(), out[val].max()
 

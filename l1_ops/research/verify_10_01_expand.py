@@ -12,7 +12,7 @@ spec = importlib.util.spec_from_file_location("pit_init", "/root/l1_ops/pit_init
 pit = importlib.util.module_from_spec(spec); spec.loader.exec_module(pit)
 
 NEW = {"treasury_m6":"m6","treasury_y2":"y2","neer_cny":"neer","dr007":"fdr007",
-       "shibor_3m":"3M-定价","lpr_1y":"lpr1y","lpr_5y":"lpr5y",
+       "shibor_3m":"shibor_3m","lpr_1y":"lpr1y","lpr_5y":"lpr5y",
        "cbond_aaa_10y":"aaa_10y","mkt_amount":"amount"}
 # 期望: (起点, 终点, 值域上下界参考)  — 实测采集器输出
 EXPECT = {

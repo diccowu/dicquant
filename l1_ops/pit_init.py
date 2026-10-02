@@ -27,6 +27,9 @@ v2.0 重建说明(2026-09-25, 双重复检 qucoder+infomana 前交付物):
        DCOILBRENTEU,第19项定稿); value_col=brent, 值域 (5.0,250.0)
     5) usdcny 值域 (5.0,10.0) → (6.0,9.0)(台账登记口径, 实测 6.093~8.71)
     6) REQUIRED 扩至 18 项 = 全部已定稿指标(含复核参照序列)
+       [v3.0 2026-10-02] REQUIRED 再扩至 27 项: 补 10-01 扩源 9 项
+       (treasury_m6/treasury_y2/neer_cny/dr007/shibor_3m/lpr_1y/lpr_5y
+        /cbond_aaa_10y/mkt_amount); 扩前已实测 9/9 满足发布日断言
     7) DATE_COL 别名: 支持非 date/period_date 命名(如 float_cap 的 TRADE_DATE)
     8) METHODOLOGY_VERSIONS 新增 float_cap 两段(2011-01-04 疑口径切换)
 
@@ -51,17 +54,69 @@ RAW_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "
 DB_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "pit", "pit.db")
 SNAP_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "pit", "snapshots")
 
+# 通达信 .day 二进制源(无 CSV 形态): raw_file → (环境变量名, vipdoc 默认路径)
+# 口径与 l1_update.collect_mkt_amount 严格一致(单一事实源)
+TDX_DAY_ENV = {
+    "sh880001.day": ("TDX_SH880001", "/mnt/c/new_tdx64/vipdoc/sh/lday/sh880001.day"),
+}
+TDX_DAY_RECORD = 32  # 32 字节/记录: date(i) open(i) high(i) low(i) close(i) amount(f) vol(i) _
+
+
+def _resolve_raw_path(raw_dir: str, raw_file: str) -> str:
+    """定位原始数据文件。
+
+    CSV 类: raw_dir/raw_file。
+    .day 二进制: 环境变量路径 > raw_dir 下副本 > vipdoc 默认路径(办公室零网络可读)。
+    """
+    if raw_file.endswith(".day"):
+        env_name, default = TDX_DAY_ENV.get(raw_file, (None, None))
+        if env_name:
+            cand = os.environ.get(env_name)
+            if cand and os.path.exists(cand):
+                return cand
+        local = os.path.join(raw_dir, raw_file)
+        if os.path.exists(local):
+            return local
+        return default or local
+    return os.path.join(raw_dir, raw_file)
+
+
+def _read_tdx_day(path: str) -> pd.DataFrame:
+    """通达信 .day 二进制日线 → DataFrame[period_date, amount]。
+
+    32 字节/记录, struct '<iiiiifii' 解析, amount 单位=元。
+    与 l1_update.collect_mkt_amount 同口径(单一事实源见该函数)。
+    """
+    import struct
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    rows = []
+    for off in range(0, len(raw) - TDX_DAY_RECORD + 1, TDX_DAY_RECORD):
+        d, _o, _h, _l, _c, amt, _v, _r = struct.unpack_from("<iiiiifii", raw, off)
+        if d > 0:
+            rows.append((str(d), float(amt)))
+    df = pd.DataFrame(rows, columns=["date", "amount"])
+    df["period_date"] = pd.to_datetime(df["date"], format="%Y%m%d").dt.date
+    return df[["period_date", "amount"]]
+
+
 # 已逐项终检确认的原始数据指标集合。
 # 扩展现有指标: 每通过一项用户终检,就往这个集合加一个 indicator_id,
 # 之后该指标文件缺失 / 发布日口径不符都会使自检 FAIL(不允许静默丢项)。
-# 当前已确认(v2.0 2026-09-25, 18 项 = 全部已定稿指标, 含复核参照序列):
-#   pmi/cpi_yoy/cpi_mom/cpi_ytd/ppi_yoy/ppi_ytd/m2_yoy/m1_yoy/shrzgm(1~9, 已定稿)
-#   hs300_pe_ttm(第18项)/float_cap(第17项)/usdcny(第14项)/treasury_y1/treasury_y10/us10y
-#   oil(第19项)/margin_balance/margin_purchase
+# 当前已确认(v3.0 2026-10-02, 27 项 = 全部已定稿指标, 含复核参照序列):
+#   ① 原 18 项(v2.0 2026-09-25): pmi/cpi_yoy/cpi_mom/cpi_ytd/ppi_yoy/ppi_ytd
+#      /m2_yoy/m1_yoy/shrzgm/hs300_pe_ttm/treasury_y1/treasury_y10/us10y/usdcny
+#      /oil/margin_balance/margin_purchase/float_cap
+#   ② 10-01 扩源 9 项(2026-10-02 终检通过后登记): treasury_m6/treasury_y2
+#      (短端+期限利差短腿)/neer_cny/dr007/shibor_3m/lpr_1y/lpr_5y
+#      /cbond_aaa_10y/mkt_amount
 REQUIRED = {"pmi", "cpi_yoy", "cpi_mom", "cpi_ytd", "ppi_yoy", "ppi_ytd",
             "m2_yoy", "m1_yoy", "shrzgm", "hs300_pe_ttm",
             "treasury_y1", "treasury_y10", "us10y", "usdcny",
-            "oil", "margin_balance", "margin_purchase", "float_cap"}
+            "oil", "margin_balance", "margin_purchase", "float_cap",
+            # —— 10-01 扩源 9 项(2026-10-02 终检登记; 已实测 9/9 满足发布日断言) ——
+            "treasury_m6", "treasury_y2", "neer_cny", "dr007", "shibor_3m",
+            "lpr_1y", "lpr_5y", "cbond_aaa_10y", "mkt_amount"}
 
 # 日期列别名: 源 CSV 日期列名 → 标准列名(date/period_date)。
 # 说明: 大部分源文件用 'date';float_cap 源为宽表, 日期列名是 TRADE_DATE。
@@ -107,7 +162,7 @@ INDICATORS = [
     # —— 10-01 扩源③: 资金面 DR007(akshare repo_rate_hist,免费实测)——
     ("dr007",         "macro_dr007_primary.csv",       "D", 0, "DR007(银行间存款类机构7天质押式回购加权利率,%);10-01扩源:源=akshare repo_rate_hist FDR007列(实测2026-09-30=1.3626%);央行公开市场操作直接盯住的资金面体温计,日频最灵敏;与Shibor互为验证(冗余非新维度);可得时点=T日盘后/T+1盘前→lag=0自洽", 0, "akshare", "fdr007", (0.0, 8.0)),
     # —— 10-01 扩源④: Shibor 3M(akshare macro_china_shibor_all,免费实测)——
-    ("shibor_3m",     "macro_shibor_primary.csv",      "D", 0, "Shibor 3M(上海银行间同业拆放利率,%);10-01扩源:源=akshare macro_china_shibor_all '3M-定价'列(实测2026-09-30=1.43%);样本比DR007宽(含全部报价行),与DR007互为交叉验证;3M为常用资金面基准;可得时点=T日盘后/T+1盘前→lag=0自洽", 0, "akshare", "3M-定价", (0.0, 10.0)),
+    ("shibor_3m",     "macro_shibor_primary.csv",      "D", 0, "Shibor 3M(上海银行间同业拆放利率,%);10-01扩源:源=akshare macro_china_shibor_all '3M-定价'列(实测2026-09-30=1.43%);样本比DR007宽(含全部报价行),与DR007互为交叉验证;3M为常用资金面基准;可得时点=T日盘后/T+1盘前→lag=0自洽", 0, "akshare", "shibor_3m", (0.0, 10.0)),
     # —— 10-01 扩源⑤: LPR 1Y/5Y(akshare macro_china_lpr,免费实测,月频)——
     ("lpr_1y",        "macro_lpr_primary.csv",         "M", 0, "LPR 1Y(贷款市场报价利率,%);10-01扩源:源=akshare macro_china_lpr LPR1Y列(实测2026-09-20=3.0%);MLF→LPR→实体贷款利率传导的政策转向确认信号;每月20日9:00公布→period=公布月20日,announcement=公布月末(保守晚于真实发布,无前视),lag=0;起点2019-08(改革后仅约7年)", 0, "akshare", "lpr1y", (2.0, 6.0)),
     ("lpr_5y",        "macro_lpr_primary.csv",         "M", 0, "LPR 5Y(贷款市场报价利率,%);10-01扩源:源=akshare macro_china_lpr LPR5Y列(实测2026-09-20=3.5%);房贷/长期信贷锚;发布日同lpr_1y;起点2019-08", 0, "akshare", "lpr5y", (2.0, 7.0)),
@@ -218,6 +273,8 @@ def _read_raw_csv(path: str) -> pd.DataFrame:
     """
     if not os.path.exists(path):
         raise FileNotFoundError(f"原始数据文件缺失: {path}")
+    if path.endswith(".day"):
+        return _read_tdx_day(path)   # 通达信二进制日线(无 CSV 形态)
     df = pd.read_csv(path)
     for alias, std in DATE_COL_ALIAS.items():
         if alias in df.columns:
@@ -237,7 +294,7 @@ def _migrate_indicator(con: duckdb.DuckDBPyConnection, ind: tuple,
                        raw_dir: str, vintage: date) -> int:
     """迁移单指标 CSV → observation,返回插入行数。支持多列源按 value_col 拆分。"""
     iid, raw_file, freq, _sa, _meth, lag, _src, value_col = ind[:8]
-    path = os.path.join(raw_dir, raw_file)
+    path = _resolve_raw_path(raw_dir, raw_file)
     try:
         df = _read_raw_csv(path)
     except FileNotFoundError:
@@ -321,17 +378,27 @@ def _verify_migration(con: duckdb.DuckDBPyConnection, raw_dir: str) -> list:
     """
     problems = []
     present = [f for _i, f, *_ in INDICATORS
-               if os.path.exists(os.path.join(raw_dir, f))]
+               if os.path.exists(_resolve_raw_path(raw_dir, f))]
     if not present:
         problems.append(f"原始数据目录 0/{len(INDICATORS)} 个文件存在,检查 --raw={raw_dir}")
         return problems
 
     for iid, raw_file, *_ in INDICATORS:
-        if iid in REQUIRED and not os.path.exists(os.path.join(raw_dir, raw_file)):
+        if iid in REQUIRED and not os.path.exists(_resolve_raw_path(raw_dir, raw_file)):
             problems.append(f"{iid} 文件 {raw_file} 缺失(已确认项不允许丢)")
 
+    # 主键唯一断言(2026-10-02 用户要求): observation 主键 (indicator_id, period_date,
+    # vintage_date) 必须唯一。DDL 已声明 PRIMARY KEY,但重灌/汇入路径可能绕过约束
+    # (如 DELETE-vintage 后重插、或 snapshot 恢复未带约束),此处兜底。
+    dup = con.execute(
+        "SELECT count(*) FROM (SELECT indicator_id, period_date, vintage_date "
+        "FROM observation GROUP BY 1,2,3 HAVING count(*) > 1)"
+    ).fetchone()[0]
+    if dup:
+        problems.append(f"observation 主键重复: {dup} 组 (indicator_id,period_date,vintage_date) 不唯一")
+
     for iid, raw_file, *_ in INDICATORS:
-        path = os.path.join(raw_dir, raw_file)
+        path = _resolve_raw_path(raw_dir, raw_file)
         if not os.path.exists(path):
             continue
         try:
@@ -362,6 +429,20 @@ def _verify_migration(con: duckdb.DuckDBPyConnection, raw_dir: str) -> list:
             problems.append(f"{iid}: 文件 {raw_file} 存在但迁入 0 行")
         elif db_rows < src_rows:
             problems.append(f"{iid}: 迁入 {db_rows} 行 < 源数据 {src_rows} 行(漏迁移?)")
+        # 尾部完整性断言(2026-10-02 新增, 防 A 部分尾部截断重演):
+        # pit.db 该指标 max(period_date) 必须 == L0 源该值列有效行的 max(period_date)。
+        # 背景: 2026-09-25 重灌时 pit.db 侧取数只到 09-18, 而同日 L0 源已到 09-24
+        # (treasury 系 4,133 vs 4,138 = 少 5 个交易日), 造成研究层比自己的源还短。
+        # 此处用 max(period_date) 对齐而非写死行数(契合"忌写死行数"原则)。
+        src_col = src[vcol] if vcol is not None else src[src.columns[1]]
+        if bool(src_col.notna().any()):
+            src_last = str(src.loc[src_col.notna(), "period_date"].max())
+            db_last = con.execute(
+                "SELECT max(period_date) FROM observation WHERE indicator_id = ?", [iid]
+            ).fetchone()[0]
+            if db_last is not None and str(db_last) != src_last:
+                problems.append(
+                    f"{iid}: 迁入尾部 {db_last} != 源尾部 {src_last}(尾部截断?)")
         # 值域断言(发现B 2026-09-20): 行数核对验不了 value_col 取没取错列,
         # 取错列时值域必越界(如 cpi_yoy 误填 value_col=cpi_mom → 7.1→0.4)。
         # 对每个已迁入指标查 min/max, 越界即 FAIL。
@@ -440,9 +521,9 @@ def main() -> int:
     if args.check:
         # 按指标计可用数(共享文件指标各自计数),不用 总数-缺失唯一文件 的近似
         ok = [iid for iid, raw_file, *_ in INDICATORS
-              if os.path.exists(os.path.join(args.raw, raw_file))]
+              if os.path.exists(_resolve_raw_path(args.raw, raw_file))]
         missing = sorted({raw_file for _iid, raw_file, *_ in INDICATORS
-                          if not os.path.exists(os.path.join(args.raw, raw_file))})
+                          if not os.path.exists(_resolve_raw_path(args.raw, raw_file))})
         print(f"可用指标: {len(ok)}/{len(INDICATORS)} ({', '.join(ok) or '无'})")
         if missing:
             print(f"缺失文件: {missing}")
