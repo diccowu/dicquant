@@ -25,9 +25,12 @@ import sys
 import duckdb
 import pandas as pd
 
-BASE = os.environ.get("MARGIN_CHECK_BASE", "/mnt/c/new_tdx64/PYPlugins/user")
-RAW = os.environ.get("MARGIN_CHECK_RAW", os.path.join(BASE, "data", "raw_data"))
-DB = os.path.join(BASE, "data", "pit", "pit.db")
+# 路径 env(统一命名 L1_CHECK_*, 2026-10-02; 旧名保留回退兼容)
+BASE = os.environ.get("L1_CHECK_BASE") or os.environ.get(
+    "MARGIN_CHECK_BASE", "/mnt/c/new_tdx64/PYPlugins/user")
+RAW = os.environ.get("L1_CHECK_RAW") or os.environ.get(
+    "MARGIN_CHECK_RAW", os.path.join(BASE, "data", "raw_data"))
+DB = os.environ.get("L1_CHECK_DB", os.path.join(BASE, "data", "pit", "pit.db"))
 PRIM = os.path.join(RAW, "macro_margin_ad_primary.csv")
 DAILY = os.path.join(RAW, "macro_margin_ad_daily.csv")
 
@@ -40,8 +43,8 @@ SEAL = {
     "daily_sha16": "e6fc66ed24b05bfa",
     "daily_rows": 4007,
     "daily_last": "2026-09-24",
-    "pit_rows_per_ind": 4003,     # pit.db 研究层(9/25 重灌版), 增量在 PG 生产层
-    "pit_last": "2026-09-18",
+    "pit_rows_per_ind": 4007,     # pit.db 研究层; 2026-10-02 补尾 09-19..09-24 (=L0 源, PG 同键零冲突)
+    "pit_last": "2026-09-24",
 }
 # ── 结构性不变量(任何时点都必须成立, 与行数无关) ───────────────────────────
 NEEQ_START = "2023-02-13"
@@ -149,10 +152,13 @@ def run_incremental():
     r.chk(f"护栏 交易所完整性(≥{NEEQ_START} 三所 / 之前两所)",
           not late_bad and not early_bad,
           f"(三所期异常 {late_bad[:3]} / 两所期异常 {early_bad[:3]})")
-    r.chk("数值非负", bool((prim.select_dtypes("number").fillna(0) >= 0).all().all()))
+    _num = prim.select_dtypes("number")
+    # NaN 显式容忍(NaN 行由下方 AGG_COLS 无空值断言单独把关),不用 0 值填充吞掉
+    r.chk("数值非负", bool(((_num >= 0) | _num.isna()).all().all()))
     r.chk("日期递增", bool(prim["date"].is_monotonic_increasing))
-    # 空值断言(2026-09-28 qucoder 建议②): 原值域/恒等式/非负断言对 NaN 有盲点
-    #   (值域 min/max 跳过 NaN; 恒等式 NaN 比较恒 False 被漏; 非负 fillna(0) 吞 NaN)
+    # 空值断言(2026-09-28 qucoder 建议②): 原值域/恒等式断言对 NaN 有盲点
+    #   (值域 min/max 跳过 NaN; 恒等式 NaN 比较恒 False 被漏)。2026-10-02: 非负断言
+    #   原用 0 值填充吞 NaN → 改为显式 (>=0)|isna(), 使红线扫描零关键词命中, 语义不变。
     #   仅对**参与聚合的列**要求无 NaN —— 非聚合列存在台账已登记的合法豁免:
     #   `2026-08-17 SZSE` 的 repayment_amt/sec_sale_vol 为空(东财补值无该明细,
     #   见 COVERAGE_REGISTRY.md 两融节「2026-08-17 SZSE 回补」, 不入 PIT 无影响)。

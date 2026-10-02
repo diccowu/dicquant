@@ -22,16 +22,17 @@ import os
 import sys
 from datetime import date, timedelta
 
-BASE_RAW = os.environ.get(
+# 路径 env(统一命名 L1_CHECK_*, 2026-10-02; 旧名保留回退兼容)
+BASE_RAW = os.environ.get("L1_CHECK_RAW") or os.environ.get(
     "SHRZGM_CHECK_RAW",
     r"C:\new_tdx64\PYPlugins\user\data\raw_data" if os.name == "nt"
     else "/mnt/c/new_tdx64/PYPlugins/user/data/raw_data")
-BASE_PIT = os.environ.get(
+BASE_PIT = os.environ.get("L1_CHECK_PIT") or os.environ.get(
     "SHRZGM_CHECK_PIT",
     r"C:\new_tdx64\PYPlugins\user\data\pit" if os.name == "nt"
     else "/mnt/c/new_tdx64/PYPlugins/user/data/pit")
 CSV = os.path.join(BASE_RAW, "macro_shrzgm_primary.csv")
-DB = os.path.join(BASE_PIT, "pit.db")
+DB = os.environ.get("L1_CHECK_DB", os.path.join(BASE_PIT, "pit.db"))
 
 # ── 定稿基线(2026-09-28 批改; 月频 → 每月定稿后更新) ──
 SEAL = {

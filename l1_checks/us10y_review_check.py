@@ -18,10 +18,13 @@ import sys
 import duckdb
 import pandas as pd
 
-BASE = os.environ.get("US10Y_CHECK_BASE", "/mnt/c/new_tdx64/PYPlugins/user")
-RAW_DIR = os.environ.get("US10Y_CHECK_RAW", os.path.join(BASE, "data", "raw_data"))
+# 路径 env(统一命名 L1_CHECK_*, 2026-10-02; 旧名保留回退兼容)
+BASE = os.environ.get("L1_CHECK_BASE") or os.environ.get(
+    "US10Y_CHECK_BASE", "/mnt/c/new_tdx64/PYPlugins/user")
+RAW_DIR = os.environ.get("L1_CHECK_RAW") or os.environ.get(
+    "US10Y_CHECK_RAW", os.path.join(BASE, "data", "raw_data"))
 RAW = os.path.join(RAW_DIR, "macro_us10y_primary.csv")
-DB = os.path.join(BASE, "data", "pit", "pit.db")
+DB = os.environ.get("L1_CHECK_DB", os.path.join(BASE, "data", "pit", "pit.db"))
 
 # ── 定稿基线(2026-09-28 批改) ──
 SEAL = {
@@ -29,8 +32,8 @@ SEAL = {
     "csv_sha16": "404a6678214d13e7",
     "csv_rows": 4188,
     "csv_last": "2026-09-24",
-    "pit_rows": 4184,       # pit.db 研究层(9/25 重灌版)
-    "pit_last": "2026-09-18",
+    "pit_rows": 4188,       # pit.db 研究层; 2026-10-02 补尾 09-19..09-24 (=L0 源, PG 同键零冲突)
+    "pit_last": "2026-09-24",
 }
 # ── 结构性不变量 ──
 RANGE = (0.0, 10.0)
@@ -124,6 +127,21 @@ def run_incremental():
           f"(超限 {int(over.sum())} 日" +
           (f", 如 {list(d_bp.index[over].tolist()[:3])}" if over.any() else "") + ")")
     print(f"    (实测历史 max 日变动 {d_bp.max():.1f}bp; p99={d_bp.quantile(0.99):.1f}bp)")
+
+    # ⑤ pit.db 研究层护栏(只读; 2026-10-02 补: 与 margin_review_check.py 同口径。
+    #    背景: 原增量层只读 CSV、seal 层只看 pit 行数/末日, pit.db 值被篡改两层皆不亮)
+    print("\n⑤ pit.db 研究层(只读, 增量在 PG 生产层)")
+    if os.path.exists(DB):
+        con = duckdb.connect(DB, read_only=True)
+        row = con.execute(
+            "SELECT count(*), count(*) FILTER (WHERE value IS NULL), "
+            "min(value), max(value) FROM observation WHERE indicator_id='us10y'").fetchone()
+        r.chk("pit.db us10y 无空值", row[1] == 0, f"(实 {row[1]})")
+        lo_ok = row[2] is not None and row[3] is not None
+        r.chk(f"pit.db us10y 值域内 ({RANGE[0]},{RANGE[1]})",
+              bool(lo_ok and RANGE[0] <= row[2] and row[3] <= RANGE[1]),
+              f"({row[2]:.3e} ~ {row[3]:.3e})" if lo_ok else "(空值/全空)")
+        con.close()
     return r.done()
 
 

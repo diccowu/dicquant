@@ -21,9 +21,12 @@ import os
 import sys
 from datetime import date, timedelta
 
-BASE_DIR = os.environ.get("MONEY_CHECK_BASE", "/mnt/c/new_tdx64/PYPlugins/user")
-RAW_DIR = os.environ.get("MONEY_RAW_DIR", os.path.join(BASE_DIR, "data", "raw_data"))
-DB = os.path.join(BASE_DIR, "data", "pit", "pit.db")
+# 路径 env(统一命名 L1_CHECK_*, 2026-10-02; 旧名保留回退兼容)
+BASE_DIR = os.environ.get("L1_CHECK_BASE") or os.environ.get(
+    "MONEY_CHECK_BASE", "/mnt/c/new_tdx64/PYPlugins/user")
+RAW_DIR = os.environ.get("L1_CHECK_RAW") or os.environ.get(
+    "MONEY_RAW_DIR", os.path.join(BASE_DIR, "data", "raw_data"))
+DB = os.environ.get("L1_CHECK_DB", os.path.join(BASE_DIR, "data", "pit", "pit.db"))
 F = "macro_money_supply_primary.csv"
 RAW = os.path.join(RAW_DIR, F)
 
