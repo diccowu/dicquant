@@ -30,6 +30,8 @@ v2.0 重建说明(2026-09-25, 双重复检 qucoder+infomana 前交付物):
        [v3.0 2026-10-02] REQUIRED 再扩至 27 项: 补 10-01 扩源 9 项
        (treasury_m6/treasury_y2/neer_cny/dr007/shibor_3m/lpr_1y/lpr_5y
         /cbond_aaa_10y/mkt_amount); 扩前已实测 9/9 满足发布日断言
+       [v4.0 2026-10-06] REQUIRED 再扩至 29 项: 补 10-06 两融拆分扩列 2 项
+       (margin_borrow_balance/margin_sec_lending_balance); 用户终检点头登记
     7) DATE_COL 别名: 支持非 date/period_date 命名(如 float_cap 的 TRADE_DATE)
     8) METHODOLOGY_VERSIONS 新增 float_cap 两段(2011-01-04 疑口径切换)
 
@@ -116,7 +118,9 @@ REQUIRED = {"pmi", "cpi_yoy", "cpi_mom", "cpi_ytd", "ppi_yoy", "ppi_ytd",
             "oil", "margin_balance", "margin_purchase", "float_cap",
             # —— 10-01 扩源 9 项(2026-10-02 终检登记; 已实测 9/9 满足发布日断言) ——
             "treasury_m6", "treasury_y2", "neer_cny", "dr007", "shibor_3m",
-            "lpr_1y", "lpr_5y", "cbond_aaa_10y", "mkt_amount"}
+            "lpr_1y", "lpr_5y", "cbond_aaa_10y", "mkt_amount",
+            # —— 10-06 两融拆分扩列 2 项(2026-10-06 用户终检点头登记) ——
+            "margin_borrow_balance", "margin_sec_lending_balance"}
 
 # 日期列别名: 源 CSV 日期列名 → 标准列名(date/period_date)。
 # 说明: 大部分源文件用 'date';float_cap 源为宽表, 日期列名是 TRADE_DATE。
@@ -152,13 +156,16 @@ INDICATORS = [
     # —— 两融(AmazingData,日频)——  (共享文件: 多列, value_col 按列拆分 margin_balance/margin_purchase)
     ("margin_balance",  "macro_margin_ad_daily.csv",  "D", 0, "两融余额(融资融券余额三所SUM,元);2026-09-21重建:2列日序{margin_balance,margin_purchase}(派生聚合层daily,源=AmazingData get_margin_summary三所逐日→按日SUM);口径段:2010-03-31~2023-02-10两所(SSE+SZSE)/2023-02-13起含NEEQ(北交融资融券开通,占比<0.3%);2026-08-17 SZSE源缺由东财(akshare)一致源回补(前/后一周相对差0.00%,恒等式SUM(融资余额+融券余额)=margin_balance全表0差);日频可得时点=T日盘后/T+1盘前,消费端恒T+1起usable(前视审查2026-09-21 TASK_007)→lag=0自洽", 0, "ad", "margin_balance", (0.0, 5e12)),
     ("margin_purchase", "macro_margin_ad_daily.csv",  "D", 0, "融资买入额(三所SUM,元);2026-09-21重建:派生聚合层daily[macro_margin_ad_daily.csv],源=AmazingData get_margin_summary;口径段与回补同margin_balance;日频可得时点=T日盘后/T+1盘前,消费端恒T+1起usable(前视审查2026-09-21 TASK_007)→lag=0自洽", 0, "ad", "margin_purchase", (0.0, 1e13)),
+    # —— 2026-10-06 拆分扩列: 融资余额/融券余额(与 margin_* 同 daily 文件) ——
+    ("margin_borrow_balance",     "macro_margin_ad_daily.csv", "D", 0, "融资余额(元);2026-10-06拆分扩列,源列SUM_BORROW_MONEY_BALANCE,恒等式 margin_balance=融资+融券 全表0差;口径段同margin_balance;可得时点同margin_balance→lag=0自洽", 0, "ad", "margin_borrow_balance", (0.0, 4e12)),
+    ("margin_sec_lending_balance", "macro_margin_ad_daily.csv", "D", 0, "融券余额(元);2026-10-06拆分扩列,源列SUM_SEC_LENDING_BALANCE;口径段同margin_balance;可得时点同margin_balance→lag=0自洽", 0, "ad", "margin_sec_lending_balance", (0.0, 5e11)),
     # —— 流通市值(AmazingData,日频, 第17项定稿 2026-09-22)——
     ("float_cap",     "macro_floatcap_primary.csv",    "D", 0, "A股流通市值(万元);2026-09-22定稿:源=AmazingData 申万A指 801003.SI 日频宽表{TRADE_DATE,...,TOTAL_CAP,A_FLOAT_CAP},value_col=A_FLOAT_CAP;两融占比因子分母;⚠️2011-01-04 疑似口径切换(占比72.33%→33.05%,流通市值当日−54.01%),下游跨2010/2011须显式处理,见methodology_version;实测值域6.36万亿~52.62万亿元(=6.36e8~5.26e9万元)", 0, "ad", "A_FLOAT_CAP", (6.0e8, 6.0e9)),
     # —— 10-01 扩源①: 短端国债 6M/2Y(拆已有 9 期限宽表,零新采集)——
     ("treasury_m6",   "macro_treasury_ad_primary.csv", "D", 0, "6M国债到期收益率(%),中债,AmazingData get_treasury_yield;9期限宽表{m3,m6,y1,y2,y3,y5,y7,y10,y30}按列拆分;10-01扩源:短端利率因子(交银国际60因子择时实证6M最强:年化13.2%/收益波动比71%,vs 10Y仅9.0%/53%);可得时点=T日盘后/T+1盘前,消费端恒T+1起usable(前视审查同treasury_y1)→lag=0自洽", 0, "ad", "m6", (0.0, 10.0)),
     ("treasury_y2",   "macro_treasury_ad_primary.csv", "D", 0, "2Y国债到期收益率(%),中债,AmazingData get_treasury_yield;9期限宽表按列拆分;10-01扩源:期限利差10Y−2Y短端腿(Estrella-Mishkin/芝加哥联储学术标准用2Y,替代原10Y−1Y);可得时点同treasury_y1→lag=0自洽", 0, "ad", "y2", (0.0, 10.0)),
     # —— 10-01 扩源②: BIS 人民币名义有效汇率(FRED NBCNBIS,月频,免费免key实测直下)——
-    ("neer_cny",      "macro_neer_fred_primary.csv",  "M", 0, "人民币名义有效汇率指数(BIS Broad,2010=100);10-01扩源:源=FRED NBCNBIS(BIS官方,1994-01起391行,实测60.36~114.29,最新2026-07=114.29);贸易加权多币种篮子(60+货币)剔除美元单边波动,替代双边USDCNY作汇率因子(Type2同比);BIS月中发布上月→lag=30(实测2026-07于2026-08-20更新,保守取30无前视)", 30, "fred", None, (50.0, 160.0)),
+    ("neer_cny",      "macro_neer_bis_primary.csv",  "M", 0, "人民币名义有效汇率指数(BIS Broad,2020=100);10-01扩源;2026-10-15换源:主源=BIS官方SDMX API(1994-01起392期,实测60.36~114.29,最新2026-08=113.15),FRED NBCNBIS降为兜底对照(纯历史391期,2026-06=113.62 vs BIS 113.63微差);贸易加权多币种篮子(60+货币)剔除美元单边波动,替代双边USDCNY作汇率因子(Type2同比);BIS月中发布上月→lag=30(实测BIS官方2026-08期于2026-10-15可得=滞后≤45天,保守取30无前视;⚠️引擎级须复核发布日)", 30, "bis", None, (50.0, 160.0)),
     # —— 10-01 扩源③: 资金面 DR007(akshare repo_rate_hist,免费实测)——
     ("dr007",         "macro_dr007_primary.csv",       "D", 0, "DR007(银行间存款类机构7天质押式回购加权利率,%);10-01扩源:源=akshare repo_rate_hist FDR007列(实测2026-09-30=1.3626%);央行公开市场操作直接盯住的资金面体温计,日频最灵敏;与Shibor互为验证(冗余非新维度);可得时点=T日盘后/T+1盘前→lag=0自洽", 0, "akshare", "fdr007", (0.0, 8.0)),
     # —— 10-01 扩源④: Shibor 3M(akshare macro_china_shibor_all,免费实测)——
@@ -187,8 +194,8 @@ METHODOLOGY_VERSIONS = [
      "企业债券纳「交易所企业资产支持证券」", 1),
     ("shrzgm", "v3",  "2019-12-01", None,
      "纳「国债」+「地方一般债」,合并「政府债券」;唯一真不可比断点:v1a→v1b(2016-12→2017-01)", 1),
-    ("m1_yoy", "v1", "2015-01-01", "2023-12-31",
-     "旧口径(M1=流通中货币+单位活期存款,不含居民活期)", 1),
+    ("m1_yoy", "v1", "2008-01-01", "2023-12-31",
+     "旧口径(M1=流通中货币+单位活期存款,不含居民活期);【2026-10-08 核实】M1口径1994~2024-12未变(仅2024-12修订;2001/02/11/18四次改的是M2)→2015-01涨跌系春节错位非断点;valid_from 由登记近似值 2015-01-01 修正为数据起点 2008-01-01", 1),
     ("m1_yoy", "v2", "2024-01-01", None,
      "新口径(2024-12公告调整,回溯至2024-01:纳居民活期存款)", 1),
     # 两融口径段(2026-09-21 TASK_007:两所→三所属同性质分项扩展,实体登记;数值连续非跳变)
@@ -200,11 +207,21 @@ METHODOLOGY_VERSIONS = [
      "两所口径(SSE+SZSE);NEEQ北交所融资融券2023-02-13开通前无该所数据", 1),
     ("margin_purchase", "v2", "2023-02-13", None,
      "三所口径(+NEEQ);数值连续非可比性跳变(NEEQ首日融资余额365万元,占比趋近0),仅覆盖范围如实扩展", 1),
+    # 2026-10-06 拆分扩列 2 指标 → 口径段同 margin_balance(两所→三所属同性质分项扩展)
+    ("margin_borrow_balance", "v1", "2010-03-31", "2023-02-10", "两所口径(SSE+SZSE);NEEQ北交所融资融券2023-02-13开通前无该所数据", 1),
+    ("margin_borrow_balance", "v2", "2023-02-13", None, "三所口径(+NEEQ);数值连续非可比性跳变(NEEQ首日融资余额365万元,占比趋近0),仅覆盖范围如实扩展", 1),
+    ("margin_sec_lending_balance", "v1", "2010-03-31", "2023-02-10", "两所口径(SSE+SZSE);NEEQ北交所融资融券2023-02-13开通前无该所数据", 1),
+    ("margin_sec_lending_balance", "v2", "2023-02-13", None, "三所口径(+NEEQ);数值连续非可比性跳变(NEEQ首日融资余额365万元,占比趋近0),仅覆盖范围如实扩展", 1),
     # float_cap 口径段(第17项定稿 2026-09-22: 2011-01-04 疑似口径切换, 实体登记供下游显式处理)
     ("float_cap", "v1", "2010-01-04", "2010-12-31",
      "总流通市值口径(A_FLOAT_CAP/TOTAL_CAP 占比 72.33%)", 1),
     ("float_cap", "v2", "2011-01-04", None,
      "疑「自由流通市值」口径切换:占比骤降至 33.05%,流通市值当日 −54.01%(18.92万亿→8.70万亿);下游跨 2010/2011 算占比须显式处理", 1),
+    # m2_yoy 口径段(2026-10-08 补登记·用户裁定:原仅 meta 文字说明,升级为结构登记)
+    ("m2_yoy", "v1", "2008-01-01", "2011-09-30",
+     "旧口径(2011-10 前:不含住房公积金中心存款、非存款类金融机构存款)", 1),
+    ("m2_yoy", "v2", "2011-10-01", None,
+     "2011-10 起纳入住房公积金中心存款+非存款类金融机构存款(央行公布口径,回溯式处理);公布同比序列实证连续(2011-10 前后无水平跳变),非消费断点;注:M2 无 2024 断点(2024-12 调整仅涉 M1);同比列=当时公布原样值、源余额列历史段被后续回溯属源机制(台账 §M1/M2)", 1),
 ]
 
 DDL_INDICATOR_META = """
@@ -274,7 +291,19 @@ def _read_raw_csv(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         raise FileNotFoundError(f"原始数据文件缺失: {path}")
     if path.endswith(".day"):
-        return _read_tdx_day(path)   # 通达信二进制日线(无 CSV 形态)
+        # .day 有两种形态: (a) 通达信二进制(32B/记录); (b) 本项目 raw_data 下的 CSV 副本(l1_update 产出)
+        # 按内容探测, 不按后缀 —— 2026-10-11 事故: CSV 副本被当二进制解析, 32B 错位出垃圾日期 "924"
+        with open(path, "rb") as _fh:
+            _head = _fh.read(256)
+        _is_text_csv = False
+        try:
+            _head.decode("ascii")
+            _is_text_csv = (b"," in _head) and (b"\n" in _head)
+        except UnicodeDecodeError:
+            _is_text_csv = False
+        if not _is_text_csv:
+            return _read_tdx_day(path)   # 通达信二进制日线
+        # else: 落到位下面的 CSV 分支
     df = pd.read_csv(path)
     for alias, std in DATE_COL_ALIAS.items():
         if alias in df.columns:

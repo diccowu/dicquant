@@ -43,7 +43,8 @@ PG_DEFAULT = ("host=100.76.208.125 port=5432 user=postgres "
               "keepalives=1 keepalives_idle=30 keepalives_interval=10 keepalives_count=6")
 
 DAILY = ["hs300_pe_ttm", "treasury_y1", "treasury_y10", "treasury_m6", "treasury_y2",
-         "us10y", "usdcny", "oil", "margin_balance", "margin_purchase", "float_cap",
+         "us10y", "usdcny", "oil", "margin_balance", "margin_purchase",
+         "margin_borrow_balance", "margin_sec_lending_balance", "float_cap",
          "dr007", "shibor_3m", "cbond_aaa_10y", "mkt_amount"]
 MONTHLY = ["pmi", "cpi_yoy", "cpi_mom", "cpi_ytd", "ppi_yoy", "ppi_ytd",
            "m1_yoy", "m2_yoy", "shrzgm", "neer_cny", "lpr_1y", "lpr_5y"]
@@ -128,8 +129,10 @@ def merge_append(old, new, keys, date_col="date"):
     return combined, added
 
 
-def guard(df, name, value_cols, ranges, date_col="date", dup_key=None):
-    """护栏。dup_key: 同日多行源(如两融按交易所明细)传 ["date","exchange"]，默认按日期单行"""
+def guard(df, name, value_cols, ranges, date_col="date", dup_key=None, nan_from=None):
+    """护栏。dup_key: 同日多行源(如两融按交易所明细)传 ["date","exchange"]，默认按日期单行
+    nan_from: 仅对 date>=nan_from 的行检查 NaN(用于 merged 全表复查时容忍历史遗留 NaN,
+              新数据本身已由写入前的 guard(new) 严格把关)"""
     errs = []
     if len(df) == 0:
         errs.append("空表")
@@ -148,8 +151,12 @@ def guard(df, name, value_cols, ranges, date_col="date", dup_key=None):
         errs.append("日期非递增")
     for c in value_cols:
         s = pd.to_numeric(df[c], errors="coerce")
-        if s.isna().any():
-            errs.append(f"{c} 含 NaN {s.isna().sum()} 行")
+        if nan_from is not None:
+            nan_cnt = int((s.isna() & (df[date_col] >= nan_from)).sum())
+        else:
+            nan_cnt = int(s.isna().sum())
+        if nan_cnt:
+            errs.append(f"{c} 含 NaN {nan_cnt} 行")
         lo, hi = ranges.get(c, (None, None))
         if lo is not None and s.min() < lo:
             errs.append(f"{c} 低于值域 {s.min()} < {lo}")
@@ -249,14 +256,16 @@ def collect_pmi(since):
 
 
 def collect_cpi(since):
-    """akshare macro_china_cpi → {date, cpi_yoy, cpi_mom, cpi_ytd}; date 月末"""
+    """akshare macro_china_cpi → {date, cpi_yoy, cpi_mom, cpi_ytd}; date 月末
+    ⚠️ 2026-10-15 修复: 全国-累计 列=100+累计同比(指数形 99.2~101.0) → -100 还原
+    (此前漏还原 → 2026-09 累计误写 100.9; 已修代码+清洗三处)"""
     import akshare as ak
     df = ak.macro_china_cpi()
     out = pd.DataFrame({
         "date": [_month_period(m)[1] for m in df["月份"]],
         "cpi_yoy": pd.to_numeric(df["全国-同比增长"], errors="coerce").round(1),
         "cpi_mom": pd.to_numeric(df["全国-环比增长"], errors="coerce").round(1),
-        "cpi_ytd": pd.to_numeric(df["全国-累计"], errors="coerce").round(1),
+        "cpi_ytd": (pd.to_numeric(df["全国-累计"], errors="coerce") - 100.0).round(1),
     })
     out = out.dropna(subset=["cpi_yoy"]).drop_duplicates("date", keep="last")
     out = out.sort_values("date").reset_index(drop=True)
@@ -350,7 +359,8 @@ def collect_treasury(since):
 
 def collect_margin(since):
     """星耀 get_margin_summary → DataFrame[TRADE_DATE,EXCHANGE,SUM_*]
-    → (primary{date,exchange,...}, daily{date,margin_balance,margin_purchase} 按日SUM)
+    → (primary{date,exchange,...}, daily{date,margin_balance,margin_purchase,
+       margin_borrow_balance,margin_sec_lending_balance} 按日SUM)
 
     ⚠️ 完整性护栏(2026-09-24 事故沉淀): 源按交易所**异步发布**, 残缺日(缺任一交易所)
     参与 SUM 会显著低估全市场值(09-24 只含 SSE → 低于真实 49%)。故: 只对交易所齐全的
@@ -391,9 +401,15 @@ def collect_margin(since):
         if len(prim) == 0:
             log("   ⚠️ 完整性: 本次全部日期均残缺 → 不产出数据(源补齐后自动纳入)")
             return pd.DataFrame(), pd.DataFrame()
+    # —— 值域护栏(primary 明细层): 单所单日值域 + (date,exchange) 唯一性(防重复行被聚合吸收) ——
+    # 防线前移: 抓单交易所畸变/重复行(会被 daily SUM 吸收而通过聚合层护栏)
+    guard(prim, "两融primary明细层", list(MARGIN_PRIMARY_RANGES), MARGIN_PRIMARY_RANGES,
+          "date", dup_key=["date", "exchange"])
     daily = (prim.groupby("date", as_index=False)
              .agg(margin_balance=("margin_trade_balance", "sum"),
-                  margin_purchase=("purchase_amt", "sum")))
+                  margin_purchase=("purchase_amt", "sum"),
+                  margin_borrow_balance=("borrow_balance", "sum"),
+                  margin_sec_lending_balance=("sec_lending_balance", "sum")))
     return prim, daily.sort_values("date").reset_index(drop=True)
 
 
@@ -431,18 +447,59 @@ def collect_floatcap(since):
 
 
 # ── 源采集器: 10-01 扩源(免费源: FRED / akshare / 本地通达信) ─────────────────
-def collect_neer(since):
-    """FRED NBCNBIS (BIS Broad 人民币名义有效汇率, 2010=100, 月频)
-    → {date, neer}; date=源 observation_date(月初). ⚠️ BIS 60+货币篮子 ≠ CFETS 24货币, 近似替代"""
-    import urllib.request
-    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NBCNBIS"
-    with urllib.request.urlopen(url, timeout=60) as resp:
+def _fetch_bis_neer():
+    """BIS 官方 SDMX API (v1): WS_EER 中国名义 Broad, 2020=100, 月频
+    返回 DataFrame[date, neer] (date=月初 'YYYY-MM-01'), 失败抛异常。
+    2026-10-15 新增: FRED 转发自 08-20 起停更(BIS release 同步中断),
+    直连 BIS 官方; 值链验证与 FRED 历史 391/391 逐位一致(2026-06 官方修订 0.01)"""
+    import urllib.request, re
+    url = "https://stats.bis.org/api/v1/data/BIS,WS_EER,1.0/M.N.B.CN"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=90) as resp:
         raw = resp.read().decode()
-    rows = [r.split(",") for r in raw.strip().split("\n")[1:] if r.strip()]
-    out = pd.DataFrame([(r[0], r[1]) for r in rows], columns=["date", "neer"])
+    obs = re.findall(r'TIME_PERIOD="([^"]+)"[^>]*?OBS_VALUE="([^"]+)"', raw)
+    if not obs:
+        # 属性顺序可能反向, 二次尝试
+        blocks = re.findall(r'<ss:Obs\b[^>]*/?>', raw)
+        obs = []
+        for b in blocks:
+            tp = re.search(r'TIME_PERIOD="([^"]+)"', b)
+            ov = re.search(r'OBS_VALUE="([^"]+)"', b)
+            if tp and ov:
+                obs.append((tp.group(1), ov.group(1)))
+    if not obs:
+        raise RuntimeError("BIS API 未解析到 Obs 数据")
+    # 'YYYY-MM' → 'YYYY-MM-01'
+    rows = []
+    for tp, ov in obs:
+        d = tp if len(tp) > 7 else tp + "-01"
+        rows.append((d, ov))
+    out = pd.DataFrame(rows, columns=["date", "neer"])
     out["neer"] = pd.to_numeric(out["neer"].replace(".", pd.NA), errors="coerce").round(2)
     out = out.dropna(subset=["neer"]).drop_duplicates("date", keep="last")
-    out = out.sort_values("date").reset_index(drop=True)
+    return out.sort_values("date").reset_index(drop=True)
+
+
+def collect_neer(since):
+    """BIS Broad 人民币名义有效汇率, 2020=100, 月频 → {date, neer}; date=月初
+    主源: BIS 官方 SDMX API (stats.bis.org) —— 2026-10-15 切换(FRED 转发停更)
+    兜底: FRED NBCNBIS (fredgraph.csv)
+    ⚠️ BIS 64 货币篮子 ≠ CFETS 24 货币, 近似替代"""
+    import urllib.request
+    out = None
+    try:
+        out = _fetch_bis_neer()
+    except Exception as e:
+        print(f"    ⚠️ BIS 官方 API 失败({type(e).__name__}: {str(e)[:80]}), 回落 FRED")
+    if out is None or out.empty:
+        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NBCNBIS"
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            raw = resp.read().decode()
+        rows = [r.split(",") for r in raw.strip().split("\n")[1:] if r.strip()]
+        out = pd.DataFrame([(r[0], r[1]) for r in rows], columns=["date", "neer"])
+        out["neer"] = pd.to_numeric(out["neer"].replace(".", pd.NA), errors="coerce").round(2)
+        out = out.dropna(subset=["neer"]).drop_duplicates("date", keep="last")
+        out = out.sort_values("date").reset_index(drop=True)
     return _filter_new(out, since, "date")
 
 
@@ -554,8 +611,11 @@ def collect_mkt_amount(since):
     data = p.read_bytes()
     rec = _st.unpack_from
     rows = []
-    for off in range(0, len(data), 32):
+    nfull = len(data) - (len(data) % 32)   # 只取完整 32 字节记录(防写盘瞬间尾残片)
+    for off in range(0, nfull, 32):
         d, _, _, _, _, amt, _, _ = rec("<iiiiifii", data, off)
+        if not (19000101 <= d <= 21001231):   # 日期守卫: 丢弃脏/错位记录(2026-10-11 重建事故)
+            continue
         rows.append((str(d), float(amt)))
     out = pd.DataFrame(rows, columns=["date", "amount"])
     out["date"] = pd.to_datetime(out["date"], format="%Y%m%d").dt.strftime("%Y-%m-%d")
@@ -566,6 +626,27 @@ def collect_mkt_amount(since):
 
 
 # ── 指标 → 文件/采集器/值列/值域 计划 ───────────────────────────────────────
+# 两融 daily 聚合层 4 列 → 值域(2026-10-06 拆分扩列: 融资余额/融券余额; 偿还额/卖出量因2026-08-17
+# SZSE缺明细未注册,v1 只补2干净指标; 值域 = primary 按日 SUM 实测 min~max ± 余量; 单位元)
+MARGIN_DAILY_RANGES = {
+    "margin_balance":             (0.0, 5e12),
+    "margin_purchase":            (0.0, 1e13),
+    "margin_borrow_balance":      (0.0, 4e12),
+    "margin_sec_lending_balance": (0.0, 5e11),
+}
+
+# 两融 primary 明细层 6 列 → 值域 + (date,exchange) 唯一性(2026-10-07 值域护栏拆分, 派生 t_b8324b45 意见 iii)。
+# 边界 = 历史全量实测 max × 1.5 后向上取整(取整后余量≈2×峰值, 2026-10-06 primary 8895 行实测);
+# 0 下限同时兜负值污染。复核触发: 护栏报警时 / 新交易所接入两融时 / 年度复核; 禁止现场放宽数值。
+MARGIN_PRIMARY_RANGES = {
+    "borrow_balance":       (0.0, 3e12),   # 1.52e12×1.5≈2.28e12→3e12
+    "purchase_amt":         (0.0, 4e11),   # 2.44e11×1.5≈3.66e11→4e11
+    "repayment_amt":        (0.0, 4e11),   # 2.37e11×1.5≈3.56e11→4e11
+    "sec_lending_balance":  (0.0, 2e11),   # 1.08e11×1.5≈1.62e11→2e11
+    "sec_sale_vol":         (0.0, 5e9),    # 2.61e9×1.5≈3.92e9→5e9
+    "margin_trade_balance": (0.0, 3e12),   # 1.54e12×1.5≈2.31e12→3e12
+}
+
 def build_plan():
     def s(file, engine, gc, rng, date_col="date", dup_key=None):
         return dict(file=file, engine=engine, guard_cols=gc, ranges=rng,
@@ -585,14 +666,18 @@ def build_plan():
                             {"usdcny": (6.0, 9.0)}),
         "oil":            s("brent_fred_daily.csv", "fred_oil", ["brent"],
                             {"brent": (5.0, 250.0)}),
-        "margin_balance": s("macro_margin_ad_daily.csv", "ad_margin",
-                            ["margin_balance", "margin_purchase"],
-                            {"margin_balance": (0.0, 5e12), "margin_purchase": (0.0, 1e13)},
-                            dup_key=["date", "exchange"]),
-        "margin_purchase": s("macro_margin_ad_daily.csv", "ad_margin",
-                             ["margin_balance", "margin_purchase"],
-                             {"margin_balance": (0.0, 5e12), "margin_purchase": (0.0, 1e13)},
-                             dup_key=["date", "exchange"]),
+        "margin_balance":            s("macro_margin_ad_daily.csv", "ad_margin",
+                                       list(MARGIN_DAILY_RANGES), MARGIN_DAILY_RANGES,
+                                       dup_key=["date", "exchange"]),
+        "margin_purchase":           s("macro_margin_ad_daily.csv", "ad_margin",
+                                       list(MARGIN_DAILY_RANGES), MARGIN_DAILY_RANGES,
+                                       dup_key=["date", "exchange"]),
+        "margin_borrow_balance":     s("macro_margin_ad_daily.csv", "ad_margin",
+                                       list(MARGIN_DAILY_RANGES), MARGIN_DAILY_RANGES,
+                                       dup_key=["date", "exchange"]),
+        "margin_sec_lending_balance": s("macro_margin_ad_daily.csv", "ad_margin",
+                                        list(MARGIN_DAILY_RANGES), MARGIN_DAILY_RANGES,
+                                        dup_key=["date", "exchange"]),
         "float_cap":      s("macro_floatcap_primary.csv", "ad_floatcap", ["A_FLOAT_CAP"],
                             {"A_FLOAT_CAP": (6.0e8, 6.0e9), "TOTAL_CAP": (5.0e8, 1.0e10)},
                             date_col="TRADE_DATE"),
@@ -623,7 +708,7 @@ def build_plan():
         "treasury_y2":    s("macro_treasury_ad_primary.csv", "ad_treasury",
                             ["m3", "m6", "y1", "y2", "y3", "y5", "y7", "y10", "y30"],
                             {"y2": (0.0, 10.0)}),
-        "neer_cny":       s("macro_neer_fred_primary.csv", "fred_neer", ["neer"],
+        "neer_cny":       s("macro_neer_bis_primary.csv", "bis_neer", ["neer"],
                             {"neer": (50.0, 160.0)}),
         "dr007":          s("macro_dr007_primary.csv", "ak_dr007", ["fdr007"],
                             {"fdr007": (0.0, 8.0)}),
@@ -694,7 +779,7 @@ def run_collector(engine, since):
         "ak_money": collect_money_supply, "ak_shrzgm": collect_shrzgm,
         "ad_treasury": collect_treasury, "ad_floatcap": collect_floatcap,
         "ad_margin": collect_margin,
-        "fred_neer": collect_neer, "ak_dr007": collect_dr007,
+        "bis_neer": collect_neer, "ak_dr007": collect_dr007,
         "ak_shibor": collect_shibor, "ak_lpr": collect_lpr,
         "ak_cbond_aaa": collect_cbond_aaa, "tdx_mkt_amount": collect_mkt_amount,
     }[engine](since)
@@ -774,8 +859,7 @@ def main():
             ranges = plan[group[0]]["ranges"]
             guard(new, fname, gcols, ranges, dcol, dup_key=plan[group[0]].get("dup_key"))
             if engine == "ad_margin" and new_daily is not None and len(new_daily):
-                guard(new_daily, fname + "(daily聚合层)", ["margin_balance", "margin_purchase"],
-                      ranges, "date")
+                guard(new_daily, fname + "(daily聚合层)", list(MARGIN_DAILY_RANGES), ranges, "date")
 
             # —— 写 CSV (仅 local 模式) ——
             if write_csv and not a.dry_run:
@@ -790,7 +874,9 @@ def main():
                         f"(残缺日不聚合, 源补齐后自动纳入)")
                 else:
                     merged, _ = merge_append(old, new, [dcol], dcol)
-                    guard(merged, fname + "(merged)", gcols, plan[group[0]]["ranges"], dcol)
+                    # merged 复查: NaN 仅查本次新增行(容忍历史遗留 NaN, 如 M1 2024-01 环比源曾缺)
+                    guard(merged, fname + "(merged)", gcols, plan[group[0]]["ranges"], dcol,
+                          nan_from=(new[dcol].min() if len(new) else None))
                     atomic_write_csv(merged, fpath)
                 log(f"   → CSV +{len(new)} 行  {new[dcol].iloc[0]}~{new[dcol].iloc[-1]}")
 
