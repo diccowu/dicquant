@@ -47,7 +47,7 @@ DAILY = ["hs300_pe_ttm", "treasury_y1", "treasury_y10", "treasury_m6", "treasury
          "margin_borrow_balance", "margin_sec_lending_balance", "float_cap",
          "dr007", "shibor_3m", "cbond_aaa_10y", "mkt_amount"]
 MONTHLY = ["pmi", "cpi_yoy", "cpi_mom", "cpi_ytd", "ppi_yoy", "ppi_ytd",
-           "m1_yoy", "m2_yoy", "shrzgm", "neer_cny", "lpr_1y", "lpr_5y"]
+           "m1_yoy", "m2_yoy", "shrzgm", "neer_cny", "neer_cfets", "lpr_1y", "lpr_5y"]
 
 # 两融交易所完整性基准(与 pit_init 口径段一致): 2023-02-13 北交所两融开通起含 NEEQ
 MARGIN_NEEQ_START = "2023-02-13"
@@ -104,13 +104,21 @@ def log(msg):
 
 
 def atomic_write_csv(df, path):
+    """原子写回: 保留原文件前导 # 注释行(provenance——源接口/口径/抓取时间, qucoder 二复 4);
+    仅当原文件存在时收集, 新增文件无注释行则原样写"""
+    header = ""
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            header = "".join(line for line in f if line.startswith("#"))
     tmp = Path(str(path) + ".tmp")
-    df.to_csv(tmp, index=False)
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(header)
+        df.to_csv(f, index=False, lineterminator="\n")
     os.replace(tmp, path)
 
 
 def read_csv(path):
-    return pd.read_csv(path, dtype=str)
+    return pd.read_csv(path, dtype=str, comment="#")
 
 
 def existing_max_date(df, col="date"):
@@ -192,6 +200,7 @@ def collect_usdcny(since):
     """akshare currency_boc_safe (SAFE 官方中间价) → {date, usdcny}; 源单位 100外币/元 ÷100"""
     import akshare as ak
     df = ak.currency_boc_safe()
+    _ak_guard(df, "usdcny")
     dcol = "日期" if "日期" in df.columns else df.columns[0]
     out = df[[dcol, "美元"]].copy()
     out.columns = ["date", "usdcny"]
@@ -206,6 +215,7 @@ def collect_us10y(since):
     """akshare bond_zh_us_rate (东财中美债宽表) → {date, us10y}"""
     import akshare as ak
     df = ak.bond_zh_us_rate(start_date="20100104")
+    _ak_guard(df, "us10y")
     out = df[["日期", "美国国债收益率10年"]].copy()
     out.columns = ["date", "us10y"]
     out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
@@ -215,11 +225,17 @@ def collect_us10y(since):
     return _filter_new(out, since, "date")
 
 
+def _ak_guard(df, name):
+    """akshare 空响应护栏: qemu 网络故障时 akshare 静默返回空 → 抛异常而非记'无新数据'"""
+    if df is None or len(df) == 0:
+        raise RuntimeError(f"akshare {name} 返回空 DataFrame (疑似 qemu 网络/接口故障)")
+
 def collect_hs300_pe(since):
     """akshare 中证官方 stock_zh_index_hist_csindex('000300') → {date, pe_ttm}"""
     import akshare as ak
     df = ak.stock_zh_index_hist_csindex(symbol="000300", start_date="20120904",
                                         end_date=date.today().strftime("%Y%m%d"))
+    _ak_guard(df, "hs300_pe")
     out = df[["日期", "滚动市盈率"]].copy()
     out.columns = ["date", "pe_ttm"]
     out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
@@ -253,6 +269,53 @@ def collect_pmi(since):
     out = out.dropna(subset=["pmi"]).drop_duplicates("date", keep="last")
     out = out.sort_values("date").reset_index(drop=True)
     return _filter_new(out, since, "date", "%Y-%m")
+
+
+_CFETS_API = "https://www.chinamoney.com.cn/ags/ms/cm-u-bk-fx/RmbIdxHis"
+_CFETS_START = "2015-12-11"   # 全史起点(csv 起点, 官方接口此前的值无意义或不可得)
+
+
+def collect_cfets(since):
+    """chinamoney RmbIdxHis → {date, cfets_index, bis_basket_index, sdr_basket_index}(周频);
+    官方窗口≤365天 → 360天分段; since=None 拉全史(2015-12-11起), 否则拉 since-370~today 过滤新增.
+    2026-10-19 因子8终检拍板: 监控轨独立指标, 周频源; 落库侧月频化(见 main() neer_cfets 特例)."""
+    import requests
+    now = date.today()
+    if since is None:
+        start = date.fromisoformat(_CFETS_START)
+    else:
+        start = since - timedelta(days=370)
+    frames = []
+    cur = start
+    while cur < now:
+        end = min(cur + timedelta(days=360), now)
+        r = requests.get(_CFETS_API,
+                         params={"lang": "cn", "startDate": cur.isoformat(), "endDate": end.isoformat()},
+                         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, timeout=60)
+        r.raise_for_status()
+        recs = r.json().get("records") or []
+        if recs:
+            frames.append(pd.DataFrame([{
+                "date": x["showDate"], "cfets_index": float(x["cfetsIndexRate"]),
+                "bis_basket_index": float(x["bisIndexRate"]), "sdr_basket_index": float(x["sdrIndexRate"]),
+            } for x in recs]))
+        cur = end + timedelta(days=1)
+    if not frames:
+        return pd.DataFrame(columns=["date", "cfets_index", "bis_basket_index", "sdr_basket_index"])
+    out = pd.concat(frames, ignore_index=True)
+    out = out.drop_duplicates("date", keep="last").sort_values("date").reset_index(drop=True)
+    if since is not None:
+        out = out[out["date"] > since.isoformat()].reset_index(drop=True)
+    return out
+
+
+def cfets_monthly_last(df):
+    """neer_cfets 落库侧月频化: 周频源取每月最后交易日(与 pit_init._migrate_indicator 口径一致)"""
+    if df is None or len(df) == 0:
+        return df
+    df = df.copy()
+    df["ym"] = df["date"].str[:7]
+    return df.groupby("ym", sort=True).tail(1).reset_index(drop=True)
 
 
 def collect_cpi(since):
@@ -323,10 +386,14 @@ def _ad_login():
     if _AD["logged_in"]:
         return
     import AmazingData as ad
-    ad.login(username=os.environ.get("AD_USERNAME"),
-             password=os.environ.get("AD_PASSWORD"),
-             host=os.environ.get("AD_HOST", "101.230.159.235"),
-             port=int(os.environ.get("AD_PORT", "8600")))
+    r = ad.login(username=os.environ.get("AD_USERNAME"),
+                 password=os.environ.get("AD_PASSWORD"),
+                 host=os.environ.get("AD_HOST", "101.230.159.235"),
+                 port=int(os.environ.get("AD_PORT", "8600")))
+    # 2026-10-16 加固: ad.login 失败时 SDK 仅打印 'login fail' 并返回 False, 不抛异常
+    # (办公室 21:30 事故根因: 不检查返回值 → 未登录会话拿空数据 → 被记'无新数据' → rc=0 静默)
+    if r is not True:
+        raise RuntimeError("AmazingData login fail (rc=%r) — 凭据/网络/单点登录冲突" % (r,))
     _AD["logged_in"] = True
 
 
@@ -526,7 +593,7 @@ def collect_dr007(since):
     if fails:
         log(f"   ⚠️ dr007 逐年分段: {len(fails)}/{end_y - start_y + 1} 年未取到 → {','.join(fails)}")
     if not frames:
-        return pd.DataFrame()
+        raise RuntimeError("akshare dr007 全部年份均返回空 (疑似 qemu 网络/接口故障)")
     out = pd.concat(frames, ignore_index=True)
     out = out.rename(columns={"FDR007": "fdr007"})
     out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
@@ -540,6 +607,7 @@ def collect_shibor(since):
     """akshare macro_china_shibor_all → {date, shibor_3m}; Shibor 3M(全报价行, 比 DR007 样本宽)"""
     import akshare as ak
     df = ak.macro_china_shibor_all()
+    _ak_guard(df, "shibor")
     out = df[["日期", "3M-定价"]].copy()
     out.columns = ["date", "shibor_3m"]
     out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
@@ -554,6 +622,7 @@ def collect_lpr(since):
     ⚠️ LPR 2019-08 改革前为旧贷款基础利率(2013-10 试点, 定价机制不同) → 起点 2019-08-20"""
     import akshare as ak
     df = ak.macro_china_lpr()
+    _ak_guard(df, "lpr")
     out = df[["TRADE_DATE", "LPR1Y", "LPR5Y"]].copy()
     out.columns = ["date", "lpr1y", "lpr5y"]
     out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
@@ -590,7 +659,7 @@ def collect_cbond_aaa(since):
     if fails:
         log(f"   ⚠️ cbond_aaa 逐年分段: {len(fails)}/{end_y - start_y + 1} 年未取到 → {','.join(fails)}")
     if not frames:
-        return pd.DataFrame()
+        raise RuntimeError("akshare cbond_aaa 全部年份均返回空 (疑似 qemu 网络/接口故障)")
     out = pd.concat(frames, ignore_index=True)
     out.columns = ["date", "aaa_10y"]
     out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
@@ -682,6 +751,8 @@ def build_plan():
                             {"A_FLOAT_CAP": (6.0e8, 6.0e9), "TOTAL_CAP": (5.0e8, 1.0e10)},
                             date_col="TRADE_DATE"),
         "pmi":            s("macro_pmi_primary.csv", "ak_pmi", ["pmi"], {"pmi": (30.0, 70.0)}),
+        "neer_cfets":     s("macro_cfets_index.csv", "cfets_rmb", ["cfets_index"],
+                            {"cfets_index": (90.0, 110.0)}),
         "cpi_yoy":        s("macro_cpi_primary.csv", "ak_cpi", ["cpi_yoy", "cpi_mom", "cpi_ytd"],
                             {"cpi_yoy": (-5.0, 15.0)}),
         "cpi_mom":        s("macro_cpi_primary.csv", "ak_cpi", ["cpi_yoy", "cpi_mom", "cpi_ytd"],
@@ -760,14 +831,31 @@ def upsert_pg(conn, indicator_id, df, pit, value_col, period_col="date", dry_run
         p = _parse_period(r[period_col])
         rows.append((indicator_id, p, pit._announcement_date(freq, lag, p),
                      vintage, float(r[value_col]), "initial"))
+    total = len(rows)
     if dry_run or not rows:
-        return 0, len(rows)
+        return 0, total
+    # 2026-10-18 同值跳过: 候选行与该 (indicator, period) 最新 vintage 值完全一致 → 跳过不插
+    # (月刷 local 模式 state 滞后重放时不再产生同值冗余 vintage; 修订捕获不受影响:
+    #  值不同照插新 vintage、新期间照插。消费端取最新 vintage, 同值副本零收益)
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT ON (period_date) period_date, value
+            FROM l1_observation
+            WHERE indicator_id=%s AND period_date = ANY(%s)
+            ORDER BY period_date, vintage_date DESC
+        """, (indicator_id, [r[1] for r in rows]))
+        latest = {p: float(v) for p, v in cur.fetchall()}
+    rows = [r for r in rows if r[1] not in latest or r[4] != latest[r[1]]]
+    if len(rows) < total:
+        log(f"   {indicator_id}: 同值跳过 {total - len(rows)} 行(与最新 vintage 值一致)")
+    if not rows:
+        return 0, total
     from psycopg2.extras import execute_values
     with conn.cursor() as cur:
         execute_values(cur, PG_UPSERT, rows, page_size=1000)
         inserted = cur.rowcount          # 实际插入数(ON CONFLICT 命中的不计)
     conn.commit()
-    return inserted, len(rows)
+    return inserted, total
 
 
 # ── 主流程 ─────────────────────────────────────────────────────────────────
@@ -777,6 +865,7 @@ def run_collector(engine, since):
         "ak_hs300_pe": collect_hs300_pe, "fred_oil": collect_oil,
         "ak_pmi": collect_pmi, "ak_cpi": collect_cpi, "ak_ppi": collect_ppi,
         "ak_money": collect_money_supply, "ak_shrzgm": collect_shrzgm,
+        "cfets_rmb": collect_cfets,
         "ad_treasury": collect_treasury, "ad_floatcap": collect_floatcap,
         "ad_margin": collect_margin,
         "bis_neer": collect_neer, "ak_dr007": collect_dr007,
@@ -890,6 +979,20 @@ def main():
                 if src is None or len(src) == 0:
                     log(f"   {i}: 跳过 PG(本次无齐全日聚合, 源补齐后自动纳入)")
                     continue
+                if i == "neer_cfets":
+                    # 监控轨月频化: 周频源落库取每月最后交易日(与 pit_init._migrate_indicator 口径一致)
+                    src = cfets_monthly_last(src)
+                    if not a.dry_run and conn is not None:
+                        # P0(2026-10-19 用户终检 + qucoder 二复修订): 按 src 涉及月份集合覆盖——
+                        # 同月多次"最后已发布交易日"(10-09→10-23→10-30)与跨月补发(9月末+10月初)
+                        # 都必须收敛为每月单行; 只删 max 所属月会漏掉跨月窗口的上月旧行(9月2行复现)。
+                        # dry_run 显式短路: 防未来 autocommit/commit 改动把 dry-run 变成破坏性操作(OBS-1)。
+                        months = sorted({d[:7] for d in src["date"].astype(str)})
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "DELETE FROM l1_observation WHERE indicator_id=%s "
+                                "AND to_char(date_trunc('month', period_date), 'YYYY-MM') = ANY(%s)",
+                                (i, months))
                 if vc is None or vc not in src.columns:
                     log(f"   {i}: 跳过 PG(value_col={vc} 不可用)")
                     continue
@@ -909,7 +1012,7 @@ def main():
     log(f"完成: 成功 {len(results)} 文件 / 失败 {len(failed)}")
     for f, e in failed.items():
         log(f"  ✗ {f}: {e}")
-    return 1 if failed else 0
+    return 2 if failed else 0
 
 
 if __name__ == "__main__":
